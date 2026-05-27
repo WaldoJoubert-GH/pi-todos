@@ -5,7 +5,7 @@ Plane.so todo list integration for [pi](https://pi.dev) — lists your active Pl
 ## Install
 
 ```bash
-pi install git:github.com/waldoj/pi-todos@v1.0.0
+pi install git:github.com/WaldoJoubert-GH/pi-todos@v1.0.0
 ```
 
 ## Setup
@@ -16,6 +16,14 @@ Run `/todos` in pi and follow the prompts. You'll need:
 - Your workspace slug and project ID
 
 The extension stores your token globally at `~/.pi/agent/secrets/plane.json` and per-project config in `.todo/config.json`.
+
+## Dev
+
+Test locally without tagging:
+
+```bash
+pi -e ./extensions/todos.ts
+```
 
 ## What you get
 

@@ -1,3 +1,5 @@
 node_modules/
+.pi/settings.json
 .DS_Store
 *.log
+.todo

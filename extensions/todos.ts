@@ -4,7 +4,7 @@ import * as path from "node:path";
 import * as os from "node:os";
 import * as cp from "node:child_process";
 import { Type } from "typebox";
-import { matchesKey, Key, truncateToWidth } from "@earendil-works/pi-tui";
+import { matchesKey, Key, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 
 // ── constants ────────────────────────────────────────────────────────
 
@@ -15,6 +15,22 @@ const SYNC_INTERVAL_MS = 5 * 60 * 1000; // 5 minutes
 // State groups to exclude — only "completed" means done
 const COMPLETED_GROUPS = new Set(["completed"]);
 
+// Canonical group sort order for widget pills
+const GROUP_ORDER = ["backlog", "unstarted", "started", "triage", "cancelled"];
+
+// ── hex to ANSI true-color foreground ─────────────────────────────
+
+function hexToAnsi(hex: string, text: string): string {
+  // Strip # and parse RRGGBB
+  const raw = hex.replace("#", "");
+  if (raw.length !== 6) return text;
+  const r = parseInt(raw.slice(0, 2), 16);
+  const g = parseInt(raw.slice(2, 4), 16);
+  const b = parseInt(raw.slice(4, 6), 16);
+  if (isNaN(r) || isNaN(g) || isNaN(b)) return text;
+  return `\x1b[38;2;${r};${g};${b}m${text}\x1b[0m`;
+}
+
 // ── types ────────────────────────────────────────────────────────────
 
 interface CachedIssue {
@@ -24,6 +40,7 @@ interface CachedIssue {
   description: string;
   state_name: string;
   state_group: string;
+  state_hex: string;
   assignee: string;
   link: string;
 }
@@ -33,7 +50,7 @@ interface TodoCache {
   workspace_slug: string;
   project_id: string;
   issues: CachedIssue[];
-  state_counts: Record<string, number>;
+  states: Record<string, { count: number; color: string; group: string }>;
   total_active: number;
   sync_error?: boolean;
 }
@@ -183,14 +200,14 @@ async function apiFetch<T>(url: string, token: string): Promise<ApiResult<T>> {
 async function fetchStateMap(
   config: ProjectConfig,
   token: string,
-): Promise<Map<string, { name: string; group: string }>> {
+): Promise<Map<string, { name: string; group: string; color: string }>> {
   const url = `${PLANE_API_BASE}/workspaces/${config.workspace_slug}/projects/${config.project_id}/states/`;
   const result = await apiFetch<{ results?: RawState[] }>(url, token);
   if (!result.ok) return new Map();
 
-  const map = new Map<string, { name: string; group: string }>();
+  const map = new Map<string, { name: string; group: string; color: string }>();
   for (const s of result.data.results ?? []) {
-    map.set(s.id, { name: s.name, group: s.group });
+    map.set(s.id, { name: s.name, group: s.group, color: s.color || "#808080" });
   }
   return map;
 }
@@ -294,23 +311,19 @@ async function buildCache(
     return !COMPLETED_GROUPS.has(stateObj.group);
   });
 
-  const state_counts: Record<string, number> = {
-    backlog: 0,
-    unstarted: 0,
-    started: 0,
-    triage: 0,
-    cancelled: 0,
-  };
+  const statesAcc: Record<string, { count: number; color: string; group: string }> = {};
 
   const issues: CachedIssue[] = active.map((issue) => {
     const stateObj = issue.state ? stateMap.get(issue.state) : undefined;
     const group = stateObj?.group ?? "unknown";
     const stateName = stateObj?.name ?? "Unknown";
+    const stateHex = stateObj?.color ?? "#808080";
 
-    // Count only known groups
-    if (group in state_counts) {
-      state_counts[group]++;
+    // Accumulate per-state counts
+    if (!statesAcc[stateName]) {
+      statesAcc[stateName] = { count: 0, color: stateHex, group };
     }
+    statesAcc[stateName].count++;
 
     const assignee =
       issue.assignees
@@ -330,6 +343,7 @@ async function buildCache(
       description,
       state_name: stateName,
       state_group: group,
+      state_hex: stateHex,
       assignee,
       link,
     };
@@ -342,7 +356,7 @@ async function buildCache(
     workspace_slug: config.workspace_slug,
     project_id: config.project_id,
     issues,
-    state_counts,
+    states: statesAcc,
     total_active,
   };
 
@@ -351,33 +365,37 @@ async function buildCache(
 
 // ── widget helpers ───────────────────────────────────────────────────
 
-const STATE_GROUP_LABELS: Record<string, string> = {
-  backlog: "Backlog",
-  unstarted: "Todo",
-  started: "In Prog",
-  triage: "Triage",
-  cancelled: "Cancelled",
-};
-
-const STATE_GROUP_ICONS: Record<string, string> = {
-  backlog: "▤",
-  unstarted: "○",
-  started: "◉",
-  triage: "◇",
-  cancelled: "✕",
-};
-
 function buildWidgetLines(cache: TodoCache): string[] {
   const syncIcon = cache.sync_error ? "⚠️ " : "";
   const lines: string[] = [`${syncIcon}✈️ Todos: ${cache.total_active} active`];
 
   const pillParts: string[] = [];
-  for (const group of ["backlog", "unstarted", "started", "triage", "cancelled"] as const) {
-    const count = cache.state_counts[group];
-    if (count === undefined || count === 0) continue;
-    const icon = STATE_GROUP_ICONS[group] ?? "·";
-    const label = STATE_GROUP_LABELS[group] ?? group;
-    pillParts.push(`${icon} ${label}: ${count}`);
+
+  if (cache.states) {
+    // New format: per-state pills ordered by group, then alpha
+    const entries = Object.entries(cache.states).sort(([nameA, a], [nameB, b]) => {
+      const gOrderA = GROUP_ORDER.indexOf(a.group);
+      const gOrderB = GROUP_ORDER.indexOf(b.group);
+      if (gOrderA !== gOrderB) {
+        return (gOrderA === -1 ? 999 : gOrderA) - (gOrderB === -1 ? 999 : gOrderB);
+      }
+      return nameA.localeCompare(nameB);
+    });
+
+    for (const [name, { count, color }] of entries) {
+      if (count === 0) continue;
+      pillParts.push(`${hexToAnsi(color, name)}: ${count}`);
+    }
+  } else {
+    // Backward compat: old cache with group-level state_counts
+    const sc = cache as TodoCache & { state_counts?: Record<string, number> };
+    if (sc.state_counts) {
+      for (const group of GROUP_ORDER) {
+        const count = sc.state_counts[group];
+        if (count === undefined || count === 0) continue;
+        pillParts.push(`${group}: ${count}`);
+      }
+    }
   }
 
   if (pillParts.length > 0) {
@@ -393,27 +411,6 @@ function stripHtml(html: string): string {
   return html.replace(/<[^>]*>/g, "").replace(/&amp;/g, "&").replace(/&lt;/g, "<")
     .replace(/&gt;/g, ">").replace(/&quot;/g, '"').replace(/&#39;/g, "'")
     .replace(/&nbsp;/g, " ").trim();
-}
-
-// ── state group pill colors ──────────────────────────────────────────
-
-function colorForStateGroup(group: string, theme: {
-  fg: (color: string, text: string) => string;
-}, text: string): string {
-  switch (group) {
-    case "backlog":
-      return theme.fg("dim", text);
-    case "unstarted":
-      return theme.fg("accent", text);
-    case "started":
-      return theme.fg("warning", text);
-    case "triage":
-      return theme.fg("muted", text);
-    case "cancelled":
-      return theme.fg("error", text);
-    default:
-      return text;
-  }
 }
 
 // ── overlay component ────────────────────────────────────────────────
@@ -541,41 +538,51 @@ class TodoOverlay {
 
     const lines: string[] = [];
     const t = this.theme;
+    const B = (s: string) => t.fg("border", s);
+    const innerW = Math.max(1, width - 2);
 
-    // ── title bar ────────────────────────────────────────────────────
-    const title = ` ✈️ Todos (${this.issues.length} active) `;
-    const paddedTitle = ` ${title} ${"─".repeat(Math.max(0, width - title.length - 3))}`;
-    lines.push(t.fg("accent", paddedTitle));
+    // ── top border with embedded title ───────────────────────────────
+    const title = `✈️ Todos (${this.issues.length} active)`;
+    const topDash = Math.max(0, innerW - title.length - 3);
+    lines.push(B("┌─ ") + t.fg("accent", title) + B(" " + "─".repeat(topDash) + "┐"));
 
     // ── header row ───────────────────────────────────────────────────
     const seqW = 6;
     const stateW = 12;
     const assigneeW = 16;
-    const titleW = width - seqW - stateW - assigneeW - 4;
-    if (titleW < 10) {
-      // Terminal too narrow — minimal view
-      lines.push(t.fg("muted", " Terminal too narrow for list view"));
-      lines.push(...this.issues.slice(0, Math.min(10, this.issues.length)).map((iss) => {
-        return ` ${truncateToWidth(`#${iss.sequence_id} ${iss.title}`, width - 2)}`;
-      }));
+    const gapW = 6; // 3 gaps × 2 spaces
+    const headerTitleW = innerW - seqW - stateW - assigneeW - gapW;
+    const rowTitleW = headerTitleW - 1; // rows have " " or ">" prefix that steals 1 char
+
+    if (headerTitleW < 10) {
+      // Terminal too narrow — minimal view with border
+      const narrowTitle = padOrTrunc("Terminal too narrow", innerW);
+      lines.push(B("│") + t.fg("muted", narrowTitle) + B("│"));
+      const showIssues = this.issues.slice(0, Math.min(10, this.issues.length));
+      for (const iss of showIssues) {
+        const row = padOrTrunc(`#${iss.sequence_id} ${iss.title}`, innerW);
+        lines.push(B("│") + row + B("│"));
+      }
       const remaining = this.issues.length - 10;
       if (remaining > 0) {
-        lines.push(t.fg("muted", ` … and ${remaining} more`));
+        const info = padOrTrunc(`… and ${remaining} more`, innerW);
+        lines.push(B("│") + t.fg("muted", info) + B("│"));
       }
+      lines.push(B("└" + "─".repeat(innerW) + "┘"));
       return lines;
     }
 
     const header = padOrTrunc("ID", seqW) + "  " +
-      padOrTrunc("Title", titleW) + "  " +
+      padOrTrunc("Title", headerTitleW) + "  " +
       padOrTrunc("State", stateW) + "  " +
       padOrTrunc("Assignee", assigneeW);
-    lines.push(t.fg("muted", header));
+    lines.push(B("│") + t.fg("muted", header) + B("│"));
 
-    // ── separator ────────────────────────────────────────────────────
-    lines.push(t.fg("borderMuted", "".padEnd(width, "─")));
+    // ── header-body separator ────────────────────────────────────────
+    lines.push(B("├" + "─".repeat(innerW) + "┤"));
 
     // ── issue rows ───────────────────────────────────────────────────
-    const maxVisible = Math.min(25, Math.max(5, Math.floor(width * 0.5)));
+    const maxVisible = Math.min(25, Math.max(5, Math.floor(innerW * 0.5)));
     this.visibleHeight = maxVisible;
 
     const endIdx = Math.min(this.scrollOffset + maxVisible, this.issues.length);
@@ -587,32 +594,45 @@ class TodoOverlay {
       const isSelected = idx === this.selected;
 
       const seqStr = padOrTrunc(`#${issue.sequence_id}`, seqW);
-      const titleStr = padOrTrunc(issue.title, titleW);
+      const titleStr = padOrTrunc(issue.title, rowTitleW);
       const stateStr = padOrTrunc(issue.state_name, stateW);
       const assigneeStr = padOrTrunc(issue.assignee, assigneeW);
 
-      // Color the state text by its group
-      const coloredState = colorForStateGroup(issue.state_group, t, stateStr);
+      // Color the state text using Plane's per-state hex
+      const coloredState = hexToAnsi(issue.state_hex, stateStr);
 
       const row = `${seqStr}  ${titleStr}  ${coloredState}  ${assigneeStr}`;
+      // ANSI codes in coloredState inflate str.length; use visibleWidth for padding
+      const rowVis = visibleWidth(`>${row}`);
 
       if (isSelected) {
-        lines.push(t.bg("selectedBg", t.fg("text", `>${row}`)));
+        const selectedContent = t.bg("selectedBg", t.fg("text", `>${row}`));
+        // Pad to innerW so selectedBg fills to the right border
+        const padLen = Math.max(0, innerW - rowVis);
+        lines.push(B("│") + selectedContent + " ".repeat(padLen) + B("│"));
       } else {
-        lines.push(` ${row}`);
+        // Prefix with space for non-selected; visible width = rowVis (" >row" same as ">row")
+        const padLen = Math.max(0, innerW - rowVis);
+        lines.push(B("│") + ` ${row}` + " ".repeat(padLen) + B("│"));
       }
     }
 
     // ── scroll indicator ─────────────────────────────────────────────
     if (endIdx < this.issues.length) {
       const remaining = this.issues.length - endIdx;
-      lines.push(t.fg("muted", ` ↓ ${remaining} more`));
+      const indicator = padOrTrunc(`↓ ${remaining} more`, innerW);
+      lines.push(B("│") + t.fg("muted", indicator) + B("│"));
     }
 
+    // ── body-footer separator ────────────────────────────────────────
+    lines.push(B("├" + "─".repeat(innerW) + "┤"));
+
     // ── footer ───────────────────────────────────────────────────────
-    lines.push(t.fg("muted", "".padEnd(width, "─")));
-    const footer = " ↑↓ scroll  Enter preview  Ctrl+Enter open  c copy ID  Esc close ";
-    lines.push(t.fg("dim", footer));
+    const footer = padOrTrunc("↑↓ scroll  Enter preview  Ctrl+Enter open  c copy ID  Esc close", innerW);
+    lines.push(B("│") + t.fg("dim", footer) + B("│"));
+
+    // ── bottom border ────────────────────────────────────────────────
+    lines.push(B("└" + "─".repeat(innerW) + "┘"));
 
     return lines;
   }
@@ -620,45 +640,46 @@ class TodoOverlay {
   private renderDetail(width: number): string[] {
     const t = this.theme;
     const issue = this.detailIssue!;
-    const pad = Math.max(2, Math.floor(width * 0.05));
-    const innerW = width - pad * 2;
+    const B = (s: string) => t.fg("border", s);
+    const innerW = Math.max(1, width - 2);
     const lines: string[] = [];
 
-    // Title bar
-    const title = ` ✈️ Issue #${issue.sequence_id} `;
-    const titleBar = t.bg("selectedBg", ` ${title}${"─".repeat(Math.max(0, width - title.length - 3))}`);
-    lines.push(titleBar);
+    // ── top border with embedded title ───────────────────────────────
+    const title = `✈️ Issue #${issue.sequence_id}`;
+    const topDash = Math.max(0, innerW - title.length - 3);
+    lines.push(B("┌─ ") + t.bg("selectedBg", t.fg("text", title)) + B(" " + "─".repeat(topDash) + "┐"));
 
-    // Empty line
-    lines.push("");
-
-    // Issue title (wrapped)
+    // ── issue title (wrapped) ────────────────────────────────────────
     const titleLines = wrapText(`Title: ${issue.title}`, innerW);
     for (const tl of titleLines) {
-      lines.push(" ".repeat(pad) + t.fg("accent", tl));
+      const tlPad = Math.max(0, innerW - visibleWidth(tl));
+      lines.push(B("│") + t.fg("accent", tl) + " ".repeat(tlPad) + B("│"));
     }
 
-    // Meta info
-    const meta = `State: ${issue.state_name}  ·  Assignee: ${issue.assignee}`;
-    lines.push(" ".repeat(pad) + t.fg("muted", meta));
+    // ── meta info ────────────────────────────────────────────────────
+    const coloredState = hexToAnsi(issue.state_hex, issue.state_name);
+    const meta = `${coloredState}  ${t.fg("muted", "· Assignee: " + issue.assignee)}`;
+    const metaPad = Math.max(0, innerW - visibleWidth(meta));
+    lines.push(B("│") + meta + " ".repeat(metaPad) + B("│"));
 
-    // Separator
-    lines.push(" ".repeat(pad) + t.fg("borderMuted", "─".repeat(innerW)));
+    // ── separator ────────────────────────────────────────────────────
+    lines.push(B("├" + "─".repeat(innerW) + "┤"));
 
-    // Description header
-    lines.push(" ".repeat(pad) + t.fg("dim", "Description:"));
-    lines.push("");
+    // ── description header ───────────────────────────────────────────
+    const descHdr = padOrTrunc("Description:", innerW);
+    lines.push(B("│") + t.fg("dim", descHdr) + B("│"));
+    // empty line
+    lines.push(B("│" + " ".repeat(innerW) + "│"));
 
-    // Description text (wrapped)
+    // ── description text (wrapped) ───────────────────────────────────
     const desc = issue.description || "(no description)";
     const descLines = wrapText(desc, innerW);
 
     // Calculate available description height
     const viewH = this.visibleHeight || Math.min(25, Math.max(5, Math.floor(width * 0.5)));
-    const chromeRows = 7; // title bar + empty + title lines (est 1-2) + meta + sep + header + empty
-    const titleLineCount = Math.max(1, titleLines.length);
-    const totalChrome = chromeRows - 2 + titleLineCount + 2; // -2 for est diff, +2 for footer
-    const availDescH = Math.max(3, viewH - totalChrome);
+    // Chrome rows: top border + title lines + meta + separator + desc header + empty + sep + footer + bottom border
+    const chromeRows = 1 + titleLines.length + 1 + 1 + 1 + 1 + 1 + 1 + 1;
+    const availDescH = Math.max(3, viewH - chromeRows);
 
     // Clamp detailScroll
     const maxScroll = Math.max(0, descLines.length - availDescH);
@@ -666,18 +687,25 @@ class TodoOverlay {
 
     const endIdx = Math.min(this.detailScroll + availDescH, descLines.length);
     for (let i = this.detailScroll; i < endIdx; i++) {
-      lines.push(" ".repeat(pad) + descLines[i]);
+      const dcPad = Math.max(0, innerW - visibleWidth(descLines[i]));
+      lines.push(B("│") + descLines[i] + " ".repeat(dcPad) + B("│"));
     }
 
     if (endIdx < descLines.length) {
-      lines.push(" ".repeat(pad) + t.fg("muted", `↓ ${descLines.length - endIdx} more lines`));
+      const indicator = `↓ ${descLines.length - endIdx} more lines`;
+      const indPad = Math.max(0, innerW - indicator.length);
+      lines.push(B("│") + t.fg("muted", indicator) + " ".repeat(indPad) + B("│"));
     }
 
-    // Footer
-    lines.push("");
-    lines.push(t.fg("muted", "─".repeat(width)));
-    const footer = " Esc back  ↑↓ scroll  Ctrl+Enter open in browser  c copy ID ";
-    lines.push(t.fg("dim", footer));
+    // ── separator ────────────────────────────────────────────────────
+    lines.push(B("├" + "─".repeat(innerW) + "┤"));
+
+    // ── footer ───────────────────────────────────────────────────────
+    const footer = padOrTrunc("Esc back  ↑↓ scroll  Ctrl+Enter open in browser  c copy ID", innerW);
+    lines.push(B("│") + t.fg("dim", footer) + B("│"));
+
+    // ── bottom border ────────────────────────────────────────────────
+    lines.push(B("└" + "─".repeat(innerW) + "┘"));
 
     return lines;
   }
