@@ -1,0 +1,12 @@
+{
+  "name": "pi-todos",
+  "version": "1.0.0",
+  "description": "Plane.so todo list integration for pi",
+  "keywords": ["pi-package"],
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-tui": "*",
+    "@earendil-works/pi-ai": "*",
+    "typebox": "*"
+  }
+}
