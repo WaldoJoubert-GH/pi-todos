@@ -5,7 +5,7 @@ Plane.so issue integration for pi — fetches, caches, and displays active (non-
 ## Language
 
 **Issue**:
-A Plane.so work item with a unique ID, sequence number, title, description, state, and optional assignee.
+A Plane.so work item with a unique ID, sequence number, title, description, state, and priority.
 _Avoid_: Ticket, task, item
 
 **State**:
@@ -23,6 +23,14 @@ _Avoid_: State color (ambiguous with theme tokens)
 **Active**:
 An Issue whose State belongs to any group other than `completed`. Backlog, unstarted, started, triage, and cancelled issues are all considered active.
 _Avoid_: Open, pending, in-flight
+
+**Slug-ID**:
+A human-readable Issue identifier formed by joining the project identifier with the issue's sequence number, e.g. `PITODOS-1`. Unique within the workspace.
+_Avoid_: Issue key, short code, ticket number
+
+**Priority**:
+A Plane issue priority level: `urgent`, `high`, `medium`, `low`, or `none`. Rendered as a color-coded label in the TUI: red for urgent, orange for high, yellow for medium, blue for low, gray for none.
+_Avoid_: Severity, importance
 
 **Widget**:
 The always-visible status bar showing issue counts per State with their Plane colors.
@@ -45,3 +53,11 @@ _Avoid_: Popup, modal (it's an overlay in pi's component model)
 > **Dev**: What if a State has no color set in Plane?
 >
 > **Domain expert**: Fall back to neutral gray.
+>
+> **Dev**: How do I reference an issue when talking to a colleague?
+>
+> **Domain expert**: Use the Slug-ID, like `PITODOS-1`. It's globally unique within the workspace and copyable with `c` in the overlay.
+>
+> **Dev**: What if the project identifier hasn't been fetched yet?
+>
+> **Domain expert**: Fall back to the bare sequence number like `#1` until the identifier arrives.

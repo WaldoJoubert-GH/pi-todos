@@ -31,6 +31,30 @@ function hexToAnsi(hex: string, text: string): string {
   return `\x1b[38;2;${r};${g};${b}m${text}\x1b[0m`;
 }
 
+// ── priority color mapping ───────────────────────────────────────
+
+const PRIORITY_COLORS: Record<string, string> = {
+  urgent: "#EF4444",
+  high: "#F59E0B",
+  medium: "#EAB308",
+  low: "#3B82F6",
+  none: "#9CA3AF",
+};
+
+const PRIORITY_ORDER: Record<string, number> = {
+  urgent: 0,
+  high: 1,
+  medium: 2,
+  low: 3,
+  none: 4,
+};
+
+function priorityLabel(priority: string): string {
+  const label = priority || "none";
+  const hex = PRIORITY_COLORS[label] ?? PRIORITY_COLORS.none;
+  return hexToAnsi(hex, label);
+}
+
 // ── types ────────────────────────────────────────────────────────────
 
 interface CachedIssue {
@@ -41,7 +65,7 @@ interface CachedIssue {
   state_name: string;
   state_group: string;
   state_hex: string;
-  assignee: string;
+  priority: string;
   link: string;
 }
 
@@ -82,12 +106,6 @@ interface RawState {
   name: string;
   group: string;
   color: string;
-}
-
-interface RawMember {
-  member: string; // UUID
-  member__display_name?: string;
-  display_name?: string;
 }
 
 // ── token helpers ────────────────────────────────────────────────────
@@ -212,22 +230,6 @@ async function fetchStateMap(
   return map;
 }
 
-async function fetchMemberMap(
-  config: ProjectConfig,
-  token: string,
-): Promise<Map<string, string>> {
-  const url = `${PLANE_API_BASE}/workspaces/${config.workspace_slug}/projects/${config.project_id}/members/`;
-  const result = await apiFetch<{ results?: RawMember[] }>(url, token);
-  if (!result.ok) return new Map();
-
-  const map = new Map<string, string>();
-  for (const m of result.data.results ?? []) {
-    const name = m.member__display_name ?? m.display_name ?? m.member ?? "unknown";
-    map.set(m.member, name);
-  }
-  return map;
-}
-
 // ── ensureSetup ──────────────────────────────────────────────────────
 
 async function ensureSetup(ctx: {
@@ -291,10 +293,9 @@ async function buildCache(
 ): Promise<{ cache: TodoCache | null; error: string | null }> {
   // Fetch issues
   const issuesUrl = `${PLANE_API_BASE}/workspaces/${config.workspace_slug}/projects/${config.project_id}/issues/?per_page=1000`;
-  const [issuesResult, stateMap, memberMap] = await Promise.all([
+  const [issuesResult, stateMap] = await Promise.all([
     apiFetch<{ results?: RawIssue[] }>(issuesUrl, token),
     fetchStateMap(config, token),
-    fetchMemberMap(config, token),
   ]);
 
   if (!issuesResult.ok) {
@@ -325,11 +326,7 @@ async function buildCache(
     }
     statesAcc[stateName].count++;
 
-    const assignee =
-      issue.assignees
-        .map((uid) => memberMap.get(uid))
-        .filter(Boolean)
-        .join(", ") || "unassigned";
+    const priority = issue.priority || "none";
 
     const link = `https://app.plane.so/${config.workspace_slug}/projects/${config.project_id}/issues/${issue.id}`;
 
@@ -344,9 +341,23 @@ async function buildCache(
       state_name: stateName,
       state_group: group,
       state_hex: stateHex,
-      assignee,
+      priority,
       link,
     };
+  });
+
+  // Sort: priority (urgent first) → state group → title alpha
+  const GROUP_SORT: Record<string, number> = {
+    backlog: 0, unstarted: 1, started: 2, triage: 3, cancelled: 4,
+  };
+  issues.sort((a, b) => {
+    const pA = PRIORITY_ORDER[a.priority] ?? 99;
+    const pB = PRIORITY_ORDER[b.priority] ?? 99;
+    if (pA !== pB) return pA - pB;
+    const gA = GROUP_SORT[a.state_group] ?? 99;
+    const gB = GROUP_SORT[b.state_group] ?? 99;
+    if (gA !== gB) return gA - gB;
+    return a.title.localeCompare(b.title);
   });
 
   const total_active = issues.length;
@@ -465,8 +476,10 @@ class TodoOverlay {
     // c → copy issue identifier (works in both list and detail views)
     if (matchesKey(data, "c")) {
       const issue = this.detailIssue ?? this.issues[this.selected];
-      if (issue && this.projectIdentifier) {
-        const id = `${this.projectIdentifier}-${issue.sequence_id}`;
+      if (issue) {
+        const id = this.projectIdentifier
+          ? `${this.projectIdentifier}-${issue.sequence_id}`
+          : `#${issue.sequence_id}`;
         copyToClipboard(id);
       }
       return;
@@ -547,11 +560,11 @@ class TodoOverlay {
     lines.push(B("┌─ ") + t.fg("accent", title) + B(" " + "─".repeat(topDash) + "┐"));
 
     // ── header row ───────────────────────────────────────────────────
-    const seqW = 6;
+    const slugW = 14;
     const stateW = 12;
-    const assigneeW = 16;
+    const priorityW = 8;
     const gapW = 6; // 3 gaps × 2 spaces
-    const headerTitleW = innerW - seqW - stateW - assigneeW - gapW;
+    const headerTitleW = innerW - slugW - stateW - priorityW - gapW;
     const rowTitleW = headerTitleW - 1; // rows have " " or ">" prefix that steals 1 char
 
     if (headerTitleW < 10) {
@@ -560,7 +573,10 @@ class TodoOverlay {
       lines.push(B("│") + t.fg("muted", narrowTitle) + B("│"));
       const showIssues = this.issues.slice(0, Math.min(10, this.issues.length));
       for (const iss of showIssues) {
-        const row = padOrTrunc(`#${iss.sequence_id} ${iss.title}`, innerW);
+        const id = this.projectIdentifier
+          ? `${this.projectIdentifier}-${iss.sequence_id}`
+          : `#${iss.sequence_id}`;
+        const row = padOrTrunc(`${id} ${iss.title}`, innerW);
         lines.push(B("│") + row + B("│"));
       }
       const remaining = this.issues.length - 10;
@@ -572,10 +588,10 @@ class TodoOverlay {
       return lines;
     }
 
-    const header = padOrTrunc("ID", seqW) + "  " +
+    const header = padOrTrunc("ID", slugW) + "  " +
       padOrTrunc("Title", headerTitleW) + "  " +
       padOrTrunc("State", stateW) + "  " +
-      padOrTrunc("Assignee", assigneeW);
+      padOrTrunc("Priority", priorityW);
     lines.push(B("│") + t.fg("muted", header) + B("│"));
 
     // ── header-body separator ────────────────────────────────────────
@@ -593,15 +609,19 @@ class TodoOverlay {
       const issue = displayIssues[i];
       const isSelected = idx === this.selected;
 
-      const seqStr = padOrTrunc(`#${issue.sequence_id}`, seqW);
+      const idStr = this.projectIdentifier
+        ? `${this.projectIdentifier}-${issue.sequence_id}`
+        : `#${issue.sequence_id}`;
+      const slugStr = padOrTrunc(idStr, slugW);
       const titleStr = padOrTrunc(issue.title, rowTitleW);
       const stateStr = padOrTrunc(issue.state_name, stateW);
-      const assigneeStr = padOrTrunc(issue.assignee, assigneeW);
+      const priorityStr = padOrTrunc(issue.priority, priorityW);
 
       // Color the state text using Plane's per-state hex
       const coloredState = hexToAnsi(issue.state_hex, stateStr);
+      const coloredPriority = priorityLabel(issue.priority);
 
-      const row = `${seqStr}  ${titleStr}  ${coloredState}  ${assigneeStr}`;
+      const row = `${slugStr}  ${titleStr}  ${coloredState}  ${coloredPriority}`;
       // ANSI codes in coloredState inflate str.length; use visibleWidth for padding
       const rowVis = visibleWidth(`>${row}`);
 
@@ -645,7 +665,10 @@ class TodoOverlay {
     const lines: string[] = [];
 
     // ── top border with embedded title ───────────────────────────────
-    const title = `✈️ Issue #${issue.sequence_id}`;
+    const id = this.projectIdentifier
+      ? `${this.projectIdentifier}-${issue.sequence_id}`
+      : `#${issue.sequence_id}`;
+    const title = `✈️ ${id}`;
     const topDash = Math.max(0, innerW - title.length - 3);
     lines.push(B("┌─ ") + t.bg("selectedBg", t.fg("text", title)) + B(" " + "─".repeat(topDash) + "┐"));
 
@@ -658,7 +681,8 @@ class TodoOverlay {
 
     // ── meta info ────────────────────────────────────────────────────
     const coloredState = hexToAnsi(issue.state_hex, issue.state_name);
-    const meta = `${coloredState}  ${t.fg("muted", "· Assignee: " + issue.assignee)}`;
+    const coloredPriority = priorityLabel(issue.priority);
+    const meta = `${coloredState}  ${t.fg("muted", "· Priority: ")}${coloredPriority}`;
     const metaPad = Math.max(0, innerW - visibleWidth(meta));
     lines.push(B("│") + meta + " ".repeat(metaPad) + B("│"));
 
@@ -792,7 +816,7 @@ function formatForTool(cache: TodoCache): string {
   for (const issue of cache.issues) {
     parts.push(
       `- **#${issue.sequence_id}** ${issue.title}  ` +
-        `State: ${issue.state_name} · ${issue.assignee} · [open](${issue.link})`,
+        `State: ${issue.state_name} · Priority: ${issue.priority} · [open](${issue.link})`,
     );
   }
 
