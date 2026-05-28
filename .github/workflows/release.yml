@@ -1,0 +1,88 @@
+name: Release
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Read package.json version
+        id: pkg
+        run: |
+          VERSION=$(node -e "console.log(require('./package.json').version)")
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Validate package.json
+        run: |
+          node -e "
+            const pkg = require('./package.json');
+            if (!pkg.name) throw new Error('package.json missing name');
+            if (!pkg.version) throw new Error('package.json missing version');
+            if (!pkg.keywords || !pkg.keywords.includes('pi-package')) throw new Error('package.json missing pi-package keyword');
+          "
+
+      - name: Validate extensions directory
+        run: |
+          if [ ! -d extensions ]; then
+            echo "extensions/ directory not found"
+            exit 1
+          fi
+
+      - name: Check version is newer than latest tag
+        run: |
+          LATEST_TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "v0.0.0")
+          LATEST=$(echo "$LATEST_TAG" | sed 's/^v//')
+          CURRENT="${{ steps.pkg.outputs.version }}"
+          COMPARE=$(node -e "
+            const semver = (v) => v.split('.').map(Number);
+            const [a,b] = [semver('$CURRENT'), semver('$LATEST')];
+            for (let i=0; i<3; i++) {
+              if (a[i] > b[i]) { console.log('newer'); process.exit(0); }
+              if (a[i] < b[i]) { console.log('older'); process.exit(1); }
+            }
+            console.log('equal');
+          ")
+          if [ "$COMPARE" = "older" ] || [ "$COMPARE" = "equal" ]; then
+            echo "Version $CURRENT is not newer than latest tag $LATEST_TAG"
+            exit 1
+          fi
+          echo "Version $CURRENT is newer than $LATEST_TAG ✓"
+
+      - name: Create and push tag
+        run: |
+          git tag "v${{ steps.pkg.outputs.version }}"
+          git push origin "v${{ steps.pkg.outputs.version }}"
+
+      - name: Build changelog
+        id: changelog
+        run: |
+          LATEST_TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "")
+          if [ -n "$LATEST_TAG" ]; then
+            PREV_TAG=$(git describe --tags --abbrev=0 --exclude="v${{ steps.pkg.outputs.version }}" 2>/dev/null || echo "")
+            if [ -n "$PREV_TAG" ]; then
+              CHANGELOG=$(git log --oneline "$PREV_TAG..HEAD" --no-merges || echo "")
+              echo "changelog<<EOF" >> "$GITHUB_OUTPUT"
+              echo "$CHANGELOG" >> "$GITHUB_OUTPUT"
+              echo "EOF" >> "$GITHUB_OUTPUT"
+              echo "prev_tag=$PREV_TAG" >> "$GITHUB_OUTPUT"
+            fi
+          fi
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ steps.pkg.outputs.version }}
+          name: v${{ steps.pkg.outputs.version }}
+          body: |
+            ${{ steps.changelog.outputs.changelog }}
+
+            **Full Changelog**: https://github.com/${{ github.repository }}/compare/${{ steps.changelog.outputs.prev_tag || 'v0.0.0' }}...v${{ steps.pkg.outputs.version }}
+          draft: false
+          prerelease: false

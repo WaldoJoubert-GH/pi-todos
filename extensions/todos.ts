@@ -4,13 +4,26 @@ import * as path from "node:path";
 import * as os from "node:os";
 import * as cp from "node:child_process";
 import { Type } from "typebox";
-import { matchesKey, Key, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
+import {
+  matchesKey,
+  Key,
+  truncateToWidth,
+  visibleWidth,
+} from "@earendil-works/pi-tui";
 
 // ── constants ────────────────────────────────────────────────────────
 
 const PLANE_API_BASE = "https://api.plane.so/api/v1";
-const SECRETS_FILE = path.join(os.homedir(), ".pi", "agent", "secrets", "plane.json");
+const SECRETS_FILE = path.join(
+  os.homedir(),
+  ".pi",
+  "agent",
+  "secrets",
+  "plane.json",
+);
 const SYNC_INTERVAL_MS = 5 * 60 * 1000; // 5 minutes
+const CURRENT_VERSION_FALLBACK = "1.0.1";
+const VERSION_CHECK_TIMEOUT_MS = 5000;
 
 // State groups to exclude — only "completed" means done
 const COMPLETED_GROUPS = new Set(["completed"]);
@@ -55,6 +68,113 @@ function priorityLabel(priority: string): string {
   return hexToAnsi(hex, label);
 }
 
+// ── duration formatting ──────────────────────────────────────
+
+function formatDuration(ms: number): string {
+  if (ms < 0) ms = 0;
+  const totalSec = Math.floor(ms / 1000);
+  const h = Math.floor(totalSec / 3600);
+  const m = Math.floor((totalSec % 3600) / 60);
+  const s = totalSec % 60;
+  const parts: string[] = [];
+  if (h > 0) parts.push(`${h}h`);
+  if (m > 0) parts.push(`${m}m`);
+  parts.push(`${s}s`);
+  return parts.join(" ");
+}
+
+// ── version check ────────────────────────────────────────────────
+
+function getOwnPackageJson(): Record<string, unknown> | null {
+  try {
+    const pkgPath = path.join(
+      os.homedir(),
+      ".pi",
+      "agent",
+      "git",
+      "github.com",
+      "WaldoJoubert-GH",
+      "pi-todos",
+      "package.json",
+    );
+    return JSON.parse(fs.readFileSync(pkgPath, "utf8"));
+  } catch {
+    return null;
+  }
+}
+
+function getCurrentVersion(): string {
+  const pkg = getOwnPackageJson();
+  if (pkg && typeof pkg.version === "string") return pkg.version;
+  return CURRENT_VERSION_FALLBACK;
+}
+
+function getPackageRepoUrl(): string | null {
+  const pkg = getOwnPackageJson();
+  if (!pkg) return null;
+  const repo = pkg.repository;
+  if (repo && typeof repo === "object" && repo !== null && "url" in repo) {
+    const url: unknown = (repo as Record<string, unknown>).url;
+    if (typeof url === "string" && url.length > 0) return url;
+  }
+  return null;
+}
+
+function isSemverNewer(a: string, b: string): boolean {
+  const parse = (v: string) => v.replace(/^v/, "").split(".").map(Number);
+  const av = parse(a);
+  const bv = parse(b);
+  for (let i = 0; i < Math.max(av.length, bv.length, 3); i++) {
+    const an = av[i] || 0;
+    const bn = bv[i] || 0;
+    if (an !== bn) return an > bn;
+  }
+  return false;
+}
+
+async function checkForUpdate(): Promise<void> {
+  try {
+    const currentVersion = getCurrentVersion();
+    const repoUrl = getPackageRepoUrl();
+    if (!repoUrl) return;
+
+    const gitUrl = repoUrl.replace(/^https?:\/\//, "").replace(/\.git$/, "");
+
+    const result = cp.execSync(`git ls-remote --tags https://${gitUrl}`, {
+      timeout: VERSION_CHECK_TIMEOUT_MS,
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "ignore"],
+    });
+
+    let latestVersion = currentVersion;
+    const tagRe = /refs\/tags\/(v?\d+\.\d+\.\d+)$/m;
+    for (const line of result.trim().split("\n")) {
+      if (!line) continue;
+      const match = line.match(tagRe);
+      if (!match) continue;
+      const tag = match[1];
+      if (isSemverNewer(tag, latestVersion)) {
+        latestVersion = tag;
+      }
+    }
+
+    if (latestVersion !== currentVersion) {
+      updateAvailableVersion = latestVersion;
+    }
+  } catch {
+    // Silent failure
+  }
+}
+
+function formatTimestamp(iso: string): string {
+  const d = new Date(iso);
+  const month = String(d.getMonth() + 1).padStart(2, "0");
+  const day = String(d.getDate()).padStart(2, "0");
+  const hours = String(d.getHours()).padStart(2, "0");
+  const minutes = String(d.getMinutes()).padStart(2, "0");
+  return `${month}-${day} ${hours}:${minutes}`;
+}
+
 // ── types ────────────────────────────────────────────────────────────
 
 interface CachedIssue {
@@ -77,6 +197,18 @@ interface TodoCache {
   states: Record<string, { count: number; color: string; group: string }>;
   total_active: number;
   sync_error?: boolean;
+}
+
+interface TimeEntry {
+  issue_id: string;
+  sequence_id: number;
+  title: string;
+  started_at: string;
+  stopped_at: string | null;
+}
+
+interface TimeEntryStore {
+  entries: TimeEntry[];
 }
 
 interface ProjectConfig {
@@ -114,7 +246,9 @@ function loadToken(): string | null {
   try {
     const raw = fs.readFileSync(SECRETS_FILE, "utf-8");
     const data = JSON.parse(raw);
-    return typeof data.token === "string" && data.token.length > 0 ? data.token : null;
+    return typeof data.token === "string" && data.token.length > 0
+      ? data.token
+      : null;
   } catch {
     return null;
   }
@@ -129,15 +263,24 @@ function saveToken(token: string): void {
 
 function loadProjectConfig(cwd: string): ProjectConfig | null {
   try {
-    const raw = fs.readFileSync(path.join(cwd, ".todo", "config.json"), "utf-8");
+    const raw = fs.readFileSync(
+      path.join(cwd, ".todo", "config.json"),
+      "utf-8",
+    );
     const data: Record<string, unknown> = JSON.parse(raw);
-    if (typeof data.workspace_slug !== "string" || typeof data.project_id !== "string") {
+    if (
+      typeof data.workspace_slug !== "string" ||
+      typeof data.project_id !== "string"
+    ) {
       return null;
     }
     return {
       workspace_slug: data.workspace_slug,
       project_id: data.project_id,
-      project_identifier: typeof data.project_identifier === "string" ? data.project_identifier : undefined,
+      project_identifier:
+        typeof data.project_identifier === "string"
+          ? data.project_identifier
+          : undefined,
     };
   } catch {
     return null;
@@ -147,7 +290,78 @@ function loadProjectConfig(cwd: string): ProjectConfig | null {
 function saveProjectConfig(cwd: string, cfg: ProjectConfig): void {
   const dir = path.join(cwd, ".todo");
   fs.mkdirSync(dir, { recursive: true });
-  fs.writeFileSync(path.join(dir, "config.json"), JSON.stringify(cfg, null, 2), "utf-8");
+  fs.writeFileSync(
+    path.join(dir, "config.json"),
+    JSON.stringify(cfg, null, 2),
+    "utf-8",
+  );
+}
+
+// ── time entry store helpers ─────────────────────────────────────
+
+function timeEntryStorePath(cwd: string): string {
+  return path.join(cwd, ".todo", "time-entries.json");
+}
+
+function loadTimeEntries(cwd: string): TimeEntry[] {
+  try {
+    const raw = fs.readFileSync(timeEntryStorePath(cwd), "utf-8");
+    const store = JSON.parse(raw) as TimeEntryStore;
+    return Array.isArray(store.entries) ? store.entries : [];
+  } catch {
+    return [];
+  }
+}
+
+function saveTimeEntries(cwd: string, entries: TimeEntry[]): void {
+  const file = timeEntryStorePath(cwd);
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.writeFileSync(file, JSON.stringify({ entries }, null, 2), "utf-8");
+}
+
+// ── time entry management ───────────────────────────────────────
+
+function getRunningEntry(entries: TimeEntry[]): TimeEntry | null {
+  return entries.find((e) => e.stopped_at === null) ?? null;
+}
+
+function getAccumulatedMs(entries: TimeEntry[], issueId: string): number {
+  let total = 0;
+  for (const e of entries) {
+    if (e.issue_id !== issueId) continue;
+    const start = new Date(e.started_at).getTime();
+    const end = e.stopped_at ? new Date(e.stopped_at).getTime() : Date.now();
+    total += end - start;
+  }
+  return total;
+}
+
+function startTimeEntry(entries: TimeEntry[], issue: CachedIssue, cwd: string): void {
+  const now = new Date().toISOString();
+  // Stop any existing running entry first
+  for (const e of entries) {
+    if (e.stopped_at === null) {
+      e.stopped_at = now;
+    }
+  }
+  entries.push({
+    issue_id: issue.id,
+    sequence_id: issue.sequence_id,
+    title: issue.title,
+    started_at: now,
+    stopped_at: null,
+  });
+  saveTimeEntries(cwd, entries);
+}
+
+function stopRunningEntry(entries: TimeEntry[], cwd: string): void {
+  const now = new Date().toISOString();
+  for (const e of entries) {
+    if (e.stopped_at === null) {
+      e.stopped_at = now;
+    }
+  }
+  saveTimeEntries(cwd, entries);
 }
 
 // ── cache helpers ────────────────────────────────────────────────────
@@ -225,7 +439,11 @@ async function fetchStateMap(
 
   const map = new Map<string, { name: string; group: string; color: string }>();
   for (const s of result.data.results ?? []) {
-    map.set(s.id, { name: s.name, group: s.group, color: s.color || "#808080" });
+    map.set(s.id, {
+      name: s.name,
+      group: s.group,
+      color: s.color || "#808080",
+    });
   }
   return map;
 }
@@ -255,7 +473,9 @@ async function ensureSetup(ctx: {
 
   let token = loadToken();
   if (!token) {
-    const input = await ctx.ui.input("Enter your Plane.so Personal Access Token:");
+    const input = await ctx.ui.input(
+      "Enter your Plane.so Personal Access Token:",
+    );
     if (!input || input.trim().length === 0) {
       ctx.ui.notify("No token provided — aborting.", "error");
       return null;
@@ -312,7 +532,10 @@ async function buildCache(
     return !COMPLETED_GROUPS.has(stateObj.group);
   });
 
-  const statesAcc: Record<string, { count: number; color: string; group: string }> = {};
+  const statesAcc: Record<
+    string,
+    { count: number; color: string; group: string }
+  > = {};
 
   const issues: CachedIssue[] = active.map((issue) => {
     const stateObj = issue.state ? stateMap.get(issue.state) : undefined;
@@ -331,7 +554,9 @@ async function buildCache(
     const link = `https://app.plane.so/${config.workspace_slug}/projects/${config.project_id}/issues/${issue.id}`;
 
     const description =
-      issue.description_stripped ?? stripHtml(issue.description_html ?? "") ?? "";
+      issue.description_stripped ??
+      stripHtml(issue.description_html ?? "") ??
+      "";
 
     return {
       id: issue.id,
@@ -348,7 +573,11 @@ async function buildCache(
 
   // Sort: priority (urgent first) → state group → title alpha
   const GROUP_SORT: Record<string, number> = {
-    backlog: 0, unstarted: 1, started: 2, triage: 3, cancelled: 4,
+    backlog: 0,
+    unstarted: 1,
+    started: 2,
+    triage: 3,
+    cancelled: 4,
   };
   issues.sort((a, b) => {
     const pA = PRIORITY_ORDER[a.priority] ?? 99;
@@ -376,22 +605,30 @@ async function buildCache(
 
 // ── widget helpers ───────────────────────────────────────────────────
 
-function buildWidgetLines(cache: TodoCache): string[] {
+function buildWidgetLines(
+  cache: TodoCache,
+  runningEntry: TimeEntry | null,
+  missingIssue: boolean,
+): string[] {
   const syncIcon = cache.sync_error ? "⚠️ " : "";
-  const lines: string[] = [`${syncIcon}✈️ Todos: ${cache.total_active} active`];
+  const lines: string[] = [`${syncIcon}✈️: ${cache.total_active}`];
 
   const pillParts: string[] = [];
 
   if (cache.states) {
     // New format: per-state pills ordered by group, then alpha
-    const entries = Object.entries(cache.states).sort(([nameA, a], [nameB, b]) => {
-      const gOrderA = GROUP_ORDER.indexOf(a.group);
-      const gOrderB = GROUP_ORDER.indexOf(b.group);
-      if (gOrderA !== gOrderB) {
-        return (gOrderA === -1 ? 999 : gOrderA) - (gOrderB === -1 ? 999 : gOrderB);
-      }
-      return nameA.localeCompare(nameB);
-    });
+    const entries = Object.entries(cache.states).sort(
+      ([nameA, a], [nameB, b]) => {
+        const gOrderA = GROUP_ORDER.indexOf(a.group);
+        const gOrderB = GROUP_ORDER.indexOf(b.group);
+        if (gOrderA !== gOrderB) {
+          return (
+            (gOrderA === -1 ? 999 : gOrderA) - (gOrderB === -1 ? 999 : gOrderB)
+          );
+        }
+        return nameA.localeCompare(nameB);
+      },
+    );
 
     for (const [name, { count, color }] of entries) {
       if (count === 0) continue;
@@ -413,15 +650,43 @@ function buildWidgetLines(cache: TodoCache): string[] {
     lines.push(pillParts.join("  "));
   }
 
+  // Running entry line
+  if (runningEntry) {
+    const prefix = missingIssue ? "⚠️ " : "";
+    const title =
+      runningEntry.title.length > 30
+        ? runningEntry.title.slice(0, 29) + "…"
+        : runningEntry.title;
+    const elapsed = formatDuration(
+      Date.now() - new Date(runningEntry.started_at).getTime(),
+    );
+    lines.push(`${prefix}⏱ #${runningEntry.sequence_id} ${title} — ${elapsed}`);
+  }
+
+  // Update available pill
+  if (updateAvailableVersion) {
+    const repoUrl = getPackageRepoUrl();
+    const installCmd = repoUrl
+      ? `pi install ${repoUrl}@${updateAvailableVersion}`
+      : `pi install git:github.com/WaldoJoubert-GH/pi-todos@${updateAvailableVersion}`;
+    lines.push(`🔔 pi-todos ${updateAvailableVersion} available — ${installCmd}`);
+  }
+
   return lines;
 }
 
 // ── strip HTML ─────────────────────────────────────────────────────
 
 function stripHtml(html: string): string {
-  return html.replace(/<[^>]*>/g, "").replace(/&amp;/g, "&").replace(/&lt;/g, "<")
-    .replace(/&gt;/g, ">").replace(/&quot;/g, '"').replace(/&#39;/g, "'")
-    .replace(/&nbsp;/g, " ").trim();
+  return html
+    .replace(/<[^>]*>/g, "")
+    .replace(/&amp;/g, "&")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
+    .replace(/&nbsp;/g, " ")
+    .trim();
 }
 
 // ── overlay component ────────────────────────────────────────────────
@@ -439,6 +704,10 @@ class TodoOverlay {
     bg: (color: string, text: string) => string;
   };
   private onClose: () => void;
+  private onToggleTime: (issue: CachedIssue) => void;
+  private getRunningEntryId: () => string | null;
+  private getAccumulatedMsFn: (issueId: string) => number;
+  private getTimeEntriesForIssue: (issueId: string) => TimeEntry[];
 
   constructor(
     issues: CachedIssue[],
@@ -448,11 +717,19 @@ class TodoOverlay {
     },
     onClose: () => void,
     projectIdentifier: string | null,
+    onToggleTime: (issue: CachedIssue) => void,
+    getRunningEntryId: () => string | null,
+    getAccumulatedMsFn: (issueId: string) => number,
+    getTimeEntriesForIssue: (issueId: string) => TimeEntry[],
   ) {
     this.issues = issues;
     this.theme = theme;
     this.onClose = onClose;
     this.projectIdentifier = projectIdentifier;
+    this.onToggleTime = onToggleTime;
+    this.getRunningEntryId = getRunningEntryId;
+    this.getAccumulatedMsFn = getAccumulatedMsFn;
+    this.getTimeEntriesForIssue = getTimeEntriesForIssue;
   }
 
   updateIssues(issues: CachedIssue[]): void {
@@ -481,6 +758,15 @@ class TodoOverlay {
           ? `${this.projectIdentifier}-${issue.sequence_id}`
           : `#${issue.sequence_id}`;
         copyToClipboard(id);
+      }
+      return;
+    }
+
+    // s → toggle time entry (works in both list and detail views)
+    if (matchesKey(data, "s")) {
+      const issue = this.detailIssue ?? this.issues[this.selected];
+      if (issue) {
+        this.onToggleTime(issue);
       }
       return;
     }
@@ -555,9 +841,11 @@ class TodoOverlay {
     const innerW = Math.max(1, width - 2);
 
     // ── top border with embedded title ───────────────────────────────
-    const title = `✈️ Todos (${this.issues.length} active)`;
+    const title = `✈️  Todos (${this.issues.length}) `;
     const topDash = Math.max(0, innerW - title.length - 3);
-    lines.push(B("┌─ ") + t.fg("accent", title) + B(" " + "─".repeat(topDash) + "┐"));
+    lines.push(
+      B("┌─ ") + t.fg("accent", title) + B(" " + "─".repeat(topDash) + "┐"),
+    );
 
     // ── header row ───────────────────────────────────────────────────
     const slugW = 14;
@@ -588,9 +876,13 @@ class TodoOverlay {
       return lines;
     }
 
-    const header = padOrTrunc("ID", slugW) + "  " +
-      padOrTrunc("Title", headerTitleW) + "  " +
-      padOrTrunc("State", stateW) + "  " +
+    const header =
+      padOrTrunc("ID", slugW) +
+      "  " +
+      padOrTrunc("Title", headerTitleW) +
+      "  " +
+      padOrTrunc("State", stateW) +
+      "  " +
       padOrTrunc("Priority", priorityW);
     lines.push(B("│") + t.fg("muted", header) + B("│"));
 
@@ -608,6 +900,8 @@ class TodoOverlay {
       const idx = this.scrollOffset + i;
       const issue = displayIssues[i];
       const isSelected = idx === this.selected;
+      const runningId = this.getRunningEntryId();
+      const isTimed = runningId !== null && issue.id === runningId;
 
       const idStr = this.projectIdentifier
         ? `${this.projectIdentifier}-${issue.sequence_id}`
@@ -621,15 +915,27 @@ class TodoOverlay {
       const coloredState = hexToAnsi(issue.state_hex, stateStr);
       const coloredPriority = priorityLabel(issue.priority);
 
+      const timePrefix = isTimed ? "⏱" : isSelected ? ">" : " ";
       const row = `${slugStr}  ${titleStr}  ${coloredState}  ${coloredPriority}`;
       // ANSI codes in coloredState inflate str.length; use visibleWidth for padding
       const rowVis = visibleWidth(`>${row}`);
 
       if (isSelected) {
-        const selectedContent = t.bg("selectedBg", t.fg("text", `>${row}`));
+        const selectedContent = t.bg(
+          "selectedBg",
+          t.fg("text", `${timePrefix}${row}`),
+        );
         // Pad to innerW so selectedBg fills to the right border
         const padLen = Math.max(0, innerW - rowVis);
         lines.push(B("│") + selectedContent + " ".repeat(padLen) + B("│"));
+      } else if (isTimed) {
+        // Timed but not selected: use dimmed highlight
+        const timedContent = t.bg(
+          "selectedBg",
+          t.fg("dim", `${timePrefix}${row}`),
+        );
+        const padLen = Math.max(0, innerW - rowVis);
+        lines.push(B("│") + timedContent + " ".repeat(padLen) + B("│"));
       } else {
         // Prefix with space for non-selected; visible width = rowVis (" >row" same as ">row")
         const padLen = Math.max(0, innerW - rowVis);
@@ -648,7 +954,10 @@ class TodoOverlay {
     lines.push(B("├" + "─".repeat(innerW) + "┤"));
 
     // ── footer ───────────────────────────────────────────────────────
-    const footer = padOrTrunc("↑↓ scroll  Enter preview  Ctrl+Enter open  c copy ID  Esc close", innerW);
+    const footer = padOrTrunc(
+      "↑↓ scroll  Enter preview  s start/stop  Ctrl+Enter open  c copy ID  Esc close",
+      innerW,
+    );
     lines.push(B("│") + t.fg("dim", footer) + B("│"));
 
     // ── bottom border ────────────────────────────────────────────────
@@ -670,7 +979,11 @@ class TodoOverlay {
       : `#${issue.sequence_id}`;
     const title = `✈️ ${id}`;
     const topDash = Math.max(0, innerW - title.length - 3);
-    lines.push(B("┌─ ") + t.bg("selectedBg", t.fg("text", title)) + B(" " + "─".repeat(topDash) + "┐"));
+    lines.push(
+      B("┌─ ") +
+        t.bg("selectedBg", t.fg("text", title)) +
+        B(" " + "─".repeat(topDash) + "┐"),
+    );
 
     // ── issue title (wrapped) ────────────────────────────────────────
     const titleLines = wrapText(`Title: ${issue.title}`, innerW);
@@ -682,7 +995,12 @@ class TodoOverlay {
     // ── meta info ────────────────────────────────────────────────────
     const coloredState = hexToAnsi(issue.state_hex, issue.state_name);
     const coloredPriority = priorityLabel(issue.priority);
-    const meta = `${coloredState}  ${t.fg("muted", "· Priority: ")}${coloredPriority}`;
+    const accMs = this.getAccumulatedMsFn(issue.id);
+    const accStr =
+      accMs > 0
+        ? `  ${t.fg("muted", "· Total:")} ${formatDuration(accMs)}`
+        : "";
+    const meta = `${coloredState}  ${t.fg("muted", "· Priority: ")}${coloredPriority}${accStr}`;
     const metaPad = Math.max(0, innerW - visibleWidth(meta));
     lines.push(B("│") + meta + " ".repeat(metaPad) + B("│"));
 
@@ -695,37 +1013,112 @@ class TodoOverlay {
     // empty line
     lines.push(B("│" + " ".repeat(innerW) + "│"));
 
-    // ── description text (wrapped) ───────────────────────────────────
+    // ── build scrollable content: description + time entries ─────────
+    const contentLines: string[] = [];
+
+    // Description text
     const desc = issue.description || "(no description)";
     const descLines = wrapText(desc, innerW);
-
-    // Calculate available description height
-    const viewH = this.visibleHeight || Math.min(25, Math.max(5, Math.floor(width * 0.5)));
-    // Chrome rows: top border + title lines + meta + separator + desc header + empty + sep + footer + bottom border
-    const chromeRows = 1 + titleLines.length + 1 + 1 + 1 + 1 + 1 + 1 + 1;
-    const availDescH = Math.max(3, viewH - chromeRows);
-
-    // Clamp detailScroll
-    const maxScroll = Math.max(0, descLines.length - availDescH);
-    this.detailScroll = Math.max(0, Math.min(this.detailScroll, maxScroll));
-
-    const endIdx = Math.min(this.detailScroll + availDescH, descLines.length);
-    for (let i = this.detailScroll; i < endIdx; i++) {
-      const dcPad = Math.max(0, innerW - visibleWidth(descLines[i]));
-      lines.push(B("│") + descLines[i] + " ".repeat(dcPad) + B("│"));
+    for (const dl of descLines) {
+      contentLines.push(dl);
     }
 
-    if (endIdx < descLines.length) {
-      const indicator = `↓ ${descLines.length - endIdx} more lines`;
+    // Time entries table
+    const entries = this.getTimeEntriesForIssue(issue.id);
+    if (entries.length > 0) {
+      contentLines.push(""); // blank separator
+      contentLines.push("Time Entries:");
+
+      // Column widths
+      const numW = 3;
+      const timeW = 13; // MM-DD HH:MM
+      const durW = 10;
+      const availTableW = innerW - numW - timeW * 2 - durW - 8; // 4 gaps × 2 spaces
+
+      if (availTableW >= 0) {
+        // Header row
+        const headerRow =
+          "#".padEnd(numW + 2) +
+          "Started".padEnd(timeW + 2) +
+          "Stopped".padEnd(timeW + 2) +
+          "Duration";
+        contentLines.push(headerRow);
+
+        for (let i = 0; i < entries.length; i++) {
+          const e = entries[i];
+          const num = String(i + 1).padEnd(numW);
+          const started = formatTimestamp(e.started_at);
+          const stopped = e.stopped_at
+            ? formatTimestamp(e.stopped_at)
+            : "(running)";
+          const startMs = new Date(e.started_at).getTime();
+          const endMs = e.stopped_at
+            ? new Date(e.stopped_at).getTime()
+            : Date.now();
+          const dur = formatDuration(endMs - startMs);
+          const row =
+            num.padEnd(numW + 2) +
+            started.padEnd(timeW + 2) +
+            stopped.padEnd(timeW + 2) +
+            dur;
+          contentLines.push(row);
+        }
+      } else {
+        // Terminal too narrow for table — show compact list
+        for (let i = 0; i < entries.length; i++) {
+          const e = entries[i];
+          const started = formatTimestamp(e.started_at);
+          const stopped = e.stopped_at
+            ? formatTimestamp(e.stopped_at)
+            : "running";
+          const startMs = new Date(e.started_at).getTime();
+          const endMs = e.stopped_at
+            ? new Date(e.stopped_at).getTime()
+            : Date.now();
+          const dur = formatDuration(endMs - startMs);
+          contentLines.push(
+            `  ${i + 1}. ${started} → ${stopped} (${dur})`,
+          );
+        }
+      }
+    }
+
+    // ── scroll through content ───────────────────────────────────────
+    // Chrome: top border + title + meta + sep + desc header + empty + sep + footer + bottom border
+    const chromeRows = 1 + titleLines.length + 1 + 1 + 1 + 1 + 1 + 1 + 1;
+    const viewH =
+      this.visibleHeight || Math.min(25, Math.max(5, Math.floor(width * 0.5)));
+    const availContentH = Math.max(3, viewH - chromeRows);
+
+    const maxScroll = Math.max(0, contentLines.length - availContentH);
+    this.detailScroll = Math.max(0, Math.min(this.detailScroll, maxScroll));
+
+    const endIdx = Math.min(
+      this.detailScroll + availContentH,
+      contentLines.length,
+    );
+    for (let i = this.detailScroll; i < endIdx; i++) {
+      const cl = contentLines[i];
+      const clPad = Math.max(0, innerW - visibleWidth(cl));
+      lines.push(B("│") + cl + " ".repeat(clPad) + B("│"));
+    }
+
+    if (endIdx < contentLines.length) {
+      const indicator = `↓ ${contentLines.length - endIdx} more lines`;
       const indPad = Math.max(0, innerW - indicator.length);
-      lines.push(B("│") + t.fg("muted", indicator) + " ".repeat(indPad) + B("│"));
+      lines.push(
+        B("│") + t.fg("muted", indicator) + " ".repeat(indPad) + B("│"),
+      );
     }
 
     // ── separator ────────────────────────────────────────────────────
     lines.push(B("├" + "─".repeat(innerW) + "┤"));
 
     // ── footer ───────────────────────────────────────────────────────
-    const footer = padOrTrunc("Esc back  ↑↓ scroll  Ctrl+Enter open in browser  c copy ID", innerW);
+    const footer = padOrTrunc(
+      "Esc back  s start/stop  ↑↓ scroll  Ctrl+Enter open in browser  c copy ID",
+      innerW,
+    );
     lines.push(B("│") + t.fg("dim", footer) + B("│"));
 
     // ── bottom border ────────────────────────────────────────────────
@@ -798,15 +1191,18 @@ function copyToClipboard(text: string): void {
     });
   } else {
     // Try wl-copy first, fall back to xclip
-    cp.exec(`echo -n '${escaped}' | wl-copy 2>/dev/null || echo -n '${escaped}' | xclip -selection clipboard`, (err) => {
-      if (err) console.error("Failed to copy:", err.message);
-    });
+    cp.exec(
+      `echo -n '${escaped}' | wl-copy 2>/dev/null || echo -n '${escaped}' | xclip -selection clipboard`,
+      (err) => {
+        if (err) console.error("Failed to copy:", err.message);
+      },
+    );
   }
 }
 
 // ── format for LLM tool ──────────────────────────────────────────────
 
-function formatForTool(cache: TodoCache): string {
+function formatForTool(cache: TodoCache, entries: TimeEntry[]): string {
   const parts: string[] = [
     `### Active Issues (${cache.total_active})`,
     `Last synced: ${cache.last_synced}`,
@@ -820,6 +1216,17 @@ function formatForTool(cache: TodoCache): string {
     );
   }
 
+  const running = getRunningEntry(entries);
+  if (running) {
+    const elapsed = formatDuration(
+      Date.now() - new Date(running.started_at).getTime(),
+    );
+    parts.push("");
+    parts.push(
+      `⏱ Currently tracking: #${running.sequence_id} ${running.title} (${elapsed})`,
+    );
+  }
+
   return parts.join("\n");
 }
 
@@ -829,6 +1236,60 @@ let syncTimer: ReturnType<typeof setInterval> | null = null;
 let overlayComponent: TodoOverlay | null = null;
 let overlayHandle: { close: () => void } | null = null;
 
+// Time entry state
+let timeEntryState: TimeEntry[] = [];
+let widgetTimerInterval: ReturnType<typeof setInterval> | null = null;
+let lastCache: TodoCache | null = null;
+let updateAvailableVersion: string | null = null;
+
+function startWidgetTimer(
+  ctx: { ui: { setWidget: (name: string, lines: string[]) => void } },
+): void {
+  if (widgetTimerInterval) return;
+  widgetTimerInterval = setInterval(() => {
+    if (!lastCache) return;
+    const running = getRunningEntry(timeEntryState);
+    const missing =
+      running !== null &&
+      !lastCache.issues.some((iss) => iss.id === running.issue_id);
+    ctx.ui.setWidget(
+      "todos",
+      buildWidgetLines(lastCache, running, missing),
+    );
+  }, 1000);
+}
+
+function stopWidgetTimer(): void {
+  if (widgetTimerInterval) {
+    clearInterval(widgetTimerInterval);
+    widgetTimerInterval = null;
+  }
+}
+
+function handleToggleTime(
+  ctx: { ui: { setWidget: (name: string, lines: string[]) => void }; cwd: string },
+  issue: CachedIssue,
+): void {
+  const running = getRunningEntry(timeEntryState);
+  if (running && running.issue_id === issue.id) {
+    // Stop the running entry
+    stopRunningEntry(timeEntryState, ctx.cwd);
+    stopWidgetTimer();
+  } else {
+    // Stop existing if any, start new
+    startTimeEntry(timeEntryState, issue, ctx.cwd);
+    startWidgetTimer(ctx);
+  }
+  // Refresh widget
+  if (lastCache) {
+    const newRunning = getRunningEntry(timeEntryState);
+    const missing =
+      newRunning !== null &&
+      !lastCache.issues.some((iss) => iss.id === newRunning.issue_id);
+    ctx.ui.setWidget("todos", buildWidgetLines(lastCache, newRunning, missing));
+  }
+}
+
 // ── extension ────────────────────────────────────────────────────────
 
 export default function (pi: ExtensionAPI) {
@@ -836,8 +1297,10 @@ export default function (pi: ExtensionAPI) {
   pi.registerTool({
     name: "get_todos",
     label: "Get Todos",
-    description: "Retrieve the current list of active Plane.so todos for this project from local cache.",
-    promptSnippet: "Retrieve the current list of active Plane.so todos for this project",
+    description:
+      "Retrieve the current list of active Plane.so todos for this project from local cache.",
+    promptSnippet:
+      "Retrieve the current list of active Plane.so todos for this project",
     promptGuidelines: [
       "Use get_todos when the user asks about their todo list, active issues, or what they need to work on.",
     ],
@@ -846,7 +1309,12 @@ export default function (pi: ExtensionAPI) {
       const config = loadProjectConfig(ctx.cwd);
       if (!config) {
         return {
-          content: [{ type: "text", text: "No Plane project configured. Run `/todos` in an interactive session first to set up." }],
+          content: [
+            {
+              type: "text",
+              text: "No Plane project configured. Run `/todos` in an interactive session first to set up.",
+            },
+          ],
           details: {},
         };
       }
@@ -854,13 +1322,18 @@ export default function (pi: ExtensionAPI) {
       const cache = loadCache(ctx.cwd);
       if (!cache) {
         return {
-          content: [{ type: "text", text: "No cached todos found. Run `/todos` first to fetch the issue list." }],
+          content: [
+            {
+              type: "text",
+              text: "No cached todos found. Run `/todos` first to fetch the issue list.",
+            },
+          ],
           details: {},
         };
       }
 
       return {
-        content: [{ type: "text", text: formatForTool(cache) }],
+        content: [{ type: "text", text: formatForTool(cache, timeEntryState) }],
         details: { count: cache.total_active },
       };
     },
@@ -877,7 +1350,10 @@ export default function (pi: ExtensionAPI) {
 
         // Cache project identifier for future interactive use
         if (!setup.config.project_identifier) {
-          const identifier = await fetchProjectIdentifier(setup.config, setup.token);
+          const identifier = await fetchProjectIdentifier(
+            setup.config,
+            setup.token,
+          );
           if (identifier) {
             setup.config.project_identifier = identifier;
             saveProjectConfig(ctx.cwd, setup.config);
@@ -892,7 +1368,7 @@ export default function (pi: ExtensionAPI) {
         if (cache) {
           writeCache(ctx.cwd, cache);
           updateWidget(ctx, cache);
-          console.log(formatForTool(cache));
+          console.log(formatForTool(cache, timeEntryState));
         }
         return;
       }
@@ -903,7 +1379,10 @@ export default function (pi: ExtensionAPI) {
 
       // Fetch project identifier if not already cached
       if (!setup.config.project_identifier) {
-        const identifier = await fetchProjectIdentifier(setup.config, setup.token);
+        const identifier = await fetchProjectIdentifier(
+          setup.config,
+          setup.token,
+        );
         if (identifier) {
           setup.config.project_identifier = identifier;
           saveProjectConfig(ctx.cwd, setup.config);
@@ -935,7 +1414,13 @@ export default function (pi: ExtensionAPI) {
       triggerSync(ctx, setup);
 
       // Show overlay (blocks until user presses Esc)
-      await showOverlay(ctx as never, cache, setup.config.project_identifier ?? null);
+      await showOverlay(
+        ctx as never,
+        cache,
+        setup.config.project_identifier ?? null,
+        ctx.cwd,
+        (name, lines) => ctx.ui.setWidget(name, lines),
+      );
     },
   });
 
@@ -956,12 +1441,38 @@ export default function (pi: ExtensionAPI) {
       }
     }
 
+    // Load time entries
+    timeEntryState = loadTimeEntries(ctx.cwd);
+
     const cache = loadCache(ctx.cwd);
     if (cache) {
       updateWidget(ctx, cache);
     }
 
+    // Resume widget timer if a running entry exists
+    if (getRunningEntry(timeEntryState)) {
+      startWidgetTimer(ctx);
+    }
+
     startSync(ctx, { token, config });
+
+    // Check for extension updates (fire-and-forget, silent on failure)
+    checkForUpdate().then(() => {
+      if (updateAvailableVersion) {
+        const current = getCurrentVersion();
+        const repoUrl = getPackageRepoUrl();
+        const installCmd = repoUrl
+          ? `pi install ${repoUrl}@${updateAvailableVersion}`
+          : `pi install git:github.com/WaldoJoubert-GH/pi-todos@${updateAvailableVersion}`;
+        ctx.ui.notify(
+          `pi-todos ${updateAvailableVersion} available (current: ${current}). Run: ${installCmd}`,
+          "info",
+        );
+        // Refresh widget to show update pill
+        const c = loadCache(ctx.cwd);
+        if (c) updateWidget(ctx, c);
+      }
+    });
   });
 
   // ── cleanup ──────────────────────────────────────────────────────
@@ -970,6 +1481,7 @@ export default function (pi: ExtensionAPI) {
       clearInterval(syncTimer);
       syncTimer = null;
     }
+    stopWidgetTimer();
     overlayComponent = null;
     overlayHandle = null;
   });
@@ -978,7 +1490,10 @@ export default function (pi: ExtensionAPI) {
 // ── sync management ──────────────────────────────────────────────────
 
 function startSync(
-  ctx: { ui: { setWidget: (name: string, lines: string[]) => void }; cwd: string },
+  ctx: {
+    ui: { setWidget: (name: string, lines: string[]) => void };
+    cwd: string;
+  },
   setup: { token: string; config: ProjectConfig },
 ): void {
   if (syncTimer) return;
@@ -992,7 +1507,10 @@ function startSync(
 }
 
 async function triggerSync(
-  ctx: { ui: { setWidget: (name: string, lines: string[]) => void }; cwd: string },
+  ctx: {
+    ui: { setWidget: (name: string, lines: string[]) => void };
+    cwd: string;
+  },
   setup: { token: string; config: ProjectConfig },
 ): Promise<void> {
   await doSync(ctx, setup);
@@ -1001,7 +1519,10 @@ async function triggerSync(
 let syncing = false;
 
 async function doSync(
-  ctx: { ui: { setWidget: (name: string, lines: string[]) => void }; cwd: string },
+  ctx: {
+    ui: { setWidget: (name: string, lines: string[]) => void };
+    cwd: string;
+  },
   setup: { token: string; config: ProjectConfig },
 ): Promise<void> {
   if (syncing) return;
@@ -1039,7 +1560,12 @@ function updateWidget(
   ctx: { ui: { setWidget: (name: string, lines: string[]) => void } },
   cache: TodoCache,
 ): void {
-  ctx.ui.setWidget("todos", buildWidgetLines(cache));
+  lastCache = cache;
+  const running = getRunningEntry(timeEntryState);
+  const missing =
+    running !== null &&
+    !cache.issues.some((iss) => iss.id === running.issue_id);
+  ctx.ui.setWidget("todos", buildWidgetLines(cache, running, missing));
 }
 
 // ── overlay display ──────────────────────────────────────────────────
@@ -1048,6 +1574,8 @@ async function showOverlay(
   ctx: never,
   cache: TodoCache,
   projectIdentifier: string | null,
+  cwd: string,
+  setWidget: (name: string, lines: string[]) => void,
 ): Promise<void> {
   // ctx.ui.custom can work in two modes:
   //   1. ctx.ui.custom(component)              -> handle (non-overlay)
@@ -1055,16 +1583,39 @@ async function showOverlay(
   // We use mode 2 here.
   const ui = ctx as unknown as {
     ui: {
-      custom: (factory: (...args: unknown[]) => unknown, opts: { overlay: boolean; onHandle?: (h: { close: () => void }) => void }) => Promise<null>;
+      custom: (
+        factory: (...args: unknown[]) => unknown,
+        opts: {
+          overlay: boolean;
+          onHandle?: (h: { close: () => void }) => void;
+        },
+      ) => Promise<null>;
     };
   };
 
   await ui.ui.custom(
-    (_tui: unknown, theme: {
-      fg: (color: string, text: string) => string;
-      bg: (color: string, text: string) => string;
-    }, _keybindings: unknown, done: (result: null) => void) => {
-      const component = new TodoOverlay(cache.issues, theme, () => done(null), projectIdentifier);
+    (
+      _tui: unknown,
+      theme: {
+        fg: (color: string, text: string) => string;
+        bg: (color: string, text: string) => string;
+      },
+      _keybindings: unknown,
+      done: (result: null) => void,
+    ) => {
+      const component = new TodoOverlay(
+        cache.issues,
+        theme,
+        () => done(null),
+        projectIdentifier,
+        (issue: CachedIssue) => {
+          handleToggleTime({ ui: { setWidget }, cwd }, issue);
+        },
+        () => getRunningEntry(timeEntryState)?.issue_id ?? null,
+        (issueId: string) => getAccumulatedMs(timeEntryState, issueId),
+        (issueId: string) =>
+          timeEntryState.filter((e) => e.issue_id === issueId),
+      );
       overlayComponent = component;
       return component;
     },
