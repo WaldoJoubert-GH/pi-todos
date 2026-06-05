@@ -609,6 +609,13 @@ async function buildCache(
 
 // ── widget helpers ───────────────────────────────────────────────────
 
+function abbreviateState(name: string): string {
+  return name
+    .split(/\s+/)
+    .map((word) => word.charAt(0).toUpperCase())
+    .join("");
+}
+
 function buildWidgetLines(
   cache: TodoCache,
   runningEntry: TimeEntry | null,
@@ -636,7 +643,7 @@ function buildWidgetLines(
 
     for (const [name, { count, color }] of entries) {
       if (count === 0) continue;
-      pillParts.push(`${hexToAnsi(color, name)}: ${count}`);
+      pillParts.push(`${hexToAnsi(color, abbreviateState(name))}: ${count}`);
     }
   } else {
     // Backward compat: old cache with group-level state_counts

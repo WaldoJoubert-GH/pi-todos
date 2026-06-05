@@ -16,6 +16,10 @@ _Avoid_: Status
 A Plane system-level classification of States: `backlog`, `unstarted`, `started`, `completed`, `cancelled`, `triage`.
 _Avoid_: State category, workflow stage
 
+**State Abbreviation**:
+A compact rendering of a State name for the widget, formed by taking the first character of each whitespace-delimited word and uppercasing. E.g., `"TO Update Production"` → `"TUP"`, `"In Progress"` → `"IP"`. Used only on the widget pill bar; all other surfaces use the full State name.
+_Avoid_: Short name, acronym (it's a mechanical derivation, not a human-chosen label)
+
 **State Hex**:
 The per-State hex color defined in Plane (e.g., `#FF6B6B`). Used as an exact ANSI true-color foreground for TUI rendering. Fixed to Plane's branding — does not respond to theme changes.
 _Avoid_: State color (ambiguous with theme tokens)
