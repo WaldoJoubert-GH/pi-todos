@@ -336,7 +336,11 @@ function getAccumulatedMs(entries: TimeEntry[], issueId: string): number {
   return total;
 }
 
-function startTimeEntry(entries: TimeEntry[], issue: CachedIssue, cwd: string): void {
+function startTimeEntry(
+  entries: TimeEntry[],
+  issue: CachedIssue,
+  cwd: string,
+): void {
   const now = new Date().toISOString();
   // Stop any existing running entry first
   for (const e of entries) {
@@ -669,7 +673,9 @@ function buildWidgetLines(
     const installCmd = repoUrl
       ? `pi install ${repoUrl}@${updateAvailableVersion}`
       : `pi install git:github.com/WaldoJoubert-GH/pi-todos@${updateAvailableVersion}`;
-    lines.push(`🔔 pi-todos ${updateAvailableVersion} available — ${installCmd}`);
+    lines.push(
+      `🔔 pi-todos ${updateAvailableVersion} available — ${installCmd}`,
+    );
   }
 
   return lines;
@@ -841,14 +847,14 @@ class TodoOverlay {
     const innerW = Math.max(1, width - 2);
 
     // ── top border with embedded title ───────────────────────────────
-    const title = `✈️  Todos (${this.issues.length}) `;
+    const title = `Todos (${this.issues.length}) `;
     const topDash = Math.max(0, innerW - title.length - 3);
     lines.push(
       B("┌─ ") + t.fg("accent", title) + B(" " + "─".repeat(topDash) + "┐"),
     );
 
     // ── header row ───────────────────────────────────────────────────
-    const slugW = 14;
+    const slugW = 9;
     const stateW = 12;
     const priorityW = 8;
     const gapW = 6; // 3 gaps × 2 spaces
@@ -1076,9 +1082,7 @@ class TodoOverlay {
             ? new Date(e.stopped_at).getTime()
             : Date.now();
           const dur = formatDuration(endMs - startMs);
-          contentLines.push(
-            `  ${i + 1}. ${started} → ${stopped} (${dur})`,
-          );
+          contentLines.push(`  ${i + 1}. ${started} → ${stopped} (${dur})`);
         }
       }
     }
@@ -1242,9 +1246,9 @@ let widgetTimerInterval: ReturnType<typeof setInterval> | null = null;
 let lastCache: TodoCache | null = null;
 let updateAvailableVersion: string | null = null;
 
-function startWidgetTimer(
-  ctx: { ui: { setWidget: (name: string, lines: string[]) => void } },
-): void {
+function startWidgetTimer(ctx: {
+  ui: { setWidget: (name: string, lines: string[]) => void };
+}): void {
   if (widgetTimerInterval) return;
   widgetTimerInterval = setInterval(() => {
     if (!lastCache) return;
@@ -1252,10 +1256,7 @@ function startWidgetTimer(
     const missing =
       running !== null &&
       !lastCache.issues.some((iss) => iss.id === running.issue_id);
-    ctx.ui.setWidget(
-      "todos",
-      buildWidgetLines(lastCache, running, missing),
-    );
+    ctx.ui.setWidget("todos", buildWidgetLines(lastCache, running, missing));
   }, 1000);
 }
 
@@ -1267,7 +1268,10 @@ function stopWidgetTimer(): void {
 }
 
 function handleToggleTime(
-  ctx: { ui: { setWidget: (name: string, lines: string[]) => void }; cwd: string },
+  ctx: {
+    ui: { setWidget: (name: string, lines: string[]) => void };
+    cwd: string;
+  },
   issue: CachedIssue,
 ): void {
   const running = getRunningEntry(timeEntryState);
