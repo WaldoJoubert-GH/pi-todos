@@ -25,8 +25,8 @@ const SYNC_INTERVAL_MS = 5 * 60 * 1000; // 5 minutes
 const CURRENT_VERSION_FALLBACK = "1.0.1";
 const VERSION_CHECK_TIMEOUT_MS = 5000;
 
-// State groups to exclude — only "completed" means done
-const COMPLETED_GROUPS = new Set(["completed"]);
+// State groups excluded from the active list
+const EXCLUDED_GROUPS = new Set(["completed", "cancelled"]);
 
 // Canonical group sort order for widget pills
 const GROUP_ORDER = ["backlog", "unstarted", "started", "triage", "cancelled"];
@@ -287,9 +287,17 @@ function loadProjectConfig(cwd: string): ProjectConfig | null {
   }
 }
 
-function saveProjectConfig(cwd: string, cfg: ProjectConfig): void {
+// ── ensure .todo directory exists with its own .gitignore ────────────
+
+function ensureTodoDir(cwd: string): void {
   const dir = path.join(cwd, ".todo");
   fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(path.join(dir, ".gitignore"), "*\n", "utf-8");
+}
+
+function saveProjectConfig(cwd: string, cfg: ProjectConfig): void {
+  const dir = path.join(cwd, ".todo");
+  ensureTodoDir(cwd);
   fs.writeFileSync(
     path.join(dir, "config.json"),
     JSON.stringify(cfg, null, 2),
@@ -315,7 +323,7 @@ function loadTimeEntries(cwd: string): TimeEntry[] {
 
 function saveTimeEntries(cwd: string, entries: TimeEntry[]): void {
   const file = timeEntryStorePath(cwd);
-  fs.mkdirSync(path.dirname(file), { recursive: true });
+  ensureTodoDir(cwd);
   fs.writeFileSync(file, JSON.stringify({ entries }, null, 2), "utf-8");
 }
 
@@ -385,7 +393,7 @@ function loadCache(cwd: string): TodoCache | null {
 
 function writeCache(cwd: string, cache: TodoCache): void {
   const file = cachePath(cwd);
-  fs.mkdirSync(path.dirname(file), { recursive: true });
+  ensureTodoDir(cwd);
   fs.writeFileSync(file, JSON.stringify(cache, null, 2), "utf-8");
 }
 
@@ -533,7 +541,7 @@ async function buildCache(
   const active = all.filter((issue) => {
     const stateObj = issue.state ? stateMap.get(issue.state) : undefined;
     if (!stateObj) return true;
-    return !COMPLETED_GROUPS.has(stateObj.group);
+    return !EXCLUDED_GROUPS.has(stateObj.group);
   });
 
   const statesAcc: Record<
@@ -622,7 +630,7 @@ function buildWidgetLines(
   missingIssue: boolean,
 ): string[] {
   const syncIcon = cache.sync_error ? "⚠️ " : "";
-  const lines: string[] = [`${syncIcon}✈️: ${cache.total_active}`];
+  const lines: string[] = [`${syncIcon}◉: ${cache.total_active}`];
 
   const pillParts: string[] = [];
 
@@ -990,7 +998,7 @@ class TodoOverlay {
     const id = this.projectIdentifier
       ? `${this.projectIdentifier}-${issue.sequence_id}`
       : `#${issue.sequence_id}`;
-    const title = `✈️ ${id}`;
+    const title = `◉: ${id}`;
     const topDash = Math.max(0, innerW - title.length - 3);
     lines.push(
       B("┌─ ") +
@@ -1352,7 +1360,7 @@ export default function (pi: ExtensionAPI) {
 
   // ── command: /todos ──────────────────────────────────────────────
   pi.registerCommand("todos", {
-    description: "List non-completed Plane.so todos for the current project",
+    description: "List active Plane.so todos for the current project",
     handler: async (_args: string, ctx) => {
       if (!ctx.hasUI) {
         // Fallback for non-interactive mode

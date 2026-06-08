@@ -25,7 +25,7 @@ The per-State hex color defined in Plane (e.g., `#FF6B6B`). Used as an exact ANS
 _Avoid_: State color (ambiguous with theme tokens)
 
 **Active**:
-An Issue whose State belongs to any group other than `completed`. Backlog, unstarted, started, triage, and cancelled issues are all considered active.
+An Issue whose State belongs to any group other than `completed` or `cancelled`. Backlog, unstarted, started, and triage issues are considered active.
 _Avoid_: Open, pending, in-flight
 
 **Slug-ID**:
