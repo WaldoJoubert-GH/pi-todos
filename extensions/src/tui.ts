@@ -6,6 +6,7 @@ import type {
 } from "./types.js";
 import {
   hexToAnsi,
+  statePill,
   priorityLabel,
   formatDuration,
   formatTimestamp,
@@ -28,8 +29,8 @@ export type IssueFilter = "all" | "plane" | "sentry";
 const FILTER_CYCLE: IssueFilter[] = ["all", "plane", "sentry"];
 const FILTER_LABELS: Record<IssueFilter, string> = {
   all: "All",
-  plane: "Plane",
-  sentry: "Sentry",
+  plane: "\uF273 Plane",
+  sentry: "\uF188 Sentry",
 };
 
 // ── sentry level colors ──────────────────────────────────────────────
@@ -134,17 +135,18 @@ export function buildWidgetLines(
   // Line 1: counts line
   const parts: string[] = [];
   if (planeCache && planeCache.total_active > 0) {
+    const planeIcon = planeCache.sync_error ? "\uF06A " : "\uF273 ";
     parts.push(
-      `${planeCache.sync_error ? "[!] " : ""}${planeCache.total_active} todos`,
+      `${planeIcon}${planeCache.total_active} todos`,
     );
   }
   if (sentryCount > 0) {
-    parts.push(`${sentryCount} sentry`);
+    parts.push(`\uF188 ${sentryCount} sentry`);
   }
   if (parts.length === 0) {
-    lines.push("\u25C9: 0");
+    lines.push("\uF05E all clear");
   } else {
-    lines.push(`\u25C9: ${parts.join("  ")}`);
+    lines.push(parts.join("  "));
   }
 
   // Line 2+: Plane state pills (if plane configured)
@@ -167,7 +169,7 @@ export function buildWidgetLines(
     for (const [name, { count, color }] of entries) {
       if (count === 0) continue;
       pillParts.push(
-        `${hexToAnsi(color, abbreviateState(name))}: ${count}`,
+        statePill(color, `${abbreviateState(name)}: ${count}`),
       );
     }
     if (pillParts.length > 0) {
@@ -177,7 +179,7 @@ export function buildWidgetLines(
 
   // Running entry line
   if (runningEntry) {
-    const prefix = missingIssue ? "[!] " : "[T] ";
+    const prefix = missingIssue ? "\uF06A " : "\uF252 ";
     const title =
       runningEntry.title.length > 30
         ? runningEntry.title.slice(0, 29) + "\u2026"
@@ -196,7 +198,7 @@ export function buildWidgetLines(
       ? `pi install ${repoUrl}@${updateVersion}`
       : `pi install git:github.com/WaldoJoubert-GH/pi-todos@${updateVersion}`;
     lines.push(
-      `[UPDATE] pi-todos ${updateVersion} available \u2014 ${installCmd}`,
+      `\uF019 pi-todos ${updateVersion} available \u2014 ${installCmd}`,
     );
   }
 
@@ -426,13 +428,12 @@ export class UnifiedOverlay {
 
     // ── header row ───────────────────────────────────────────────
     const slugW = 10;
-    const sourceW = 3;
     const stateW = 12;
     const priorityW = 10;
-    const gapW = 8;
+    const gapW = 6;
     const headerTitleW =
-      innerW - slugW - sourceW - stateW - priorityW - gapW;
-    const rowTitleW = headerTitleW - 1;
+      innerW - slugW - stateW - priorityW - gapW;
+    const rowTitleW = headerTitleW;
 
     if (headerTitleW < 10) {
       const narrowTitle = padOrTrunc(
@@ -472,8 +473,6 @@ export class UnifiedOverlay {
 
     const header =
       padOrTrunc("ID", slugW) +
-      "  " +
-      padOrTrunc("Src", sourceW) +
       "  " +
       padOrTrunc("Title", headerTitleW) +
       "  " +
@@ -523,16 +522,16 @@ export class UnifiedOverlay {
               : `#${issue.sequence_id}`
             : issue.id?.slice(0, 8) ?? "?"
           : `#${issue.sentry_id}`;
-      const slugStr = padOrTrunc(idStr, slugW);
-      const sourceStr = issue.source === "plane" ? "Pln" : "Snt";
+      const sourceIcon = issue.source === "plane" ? "\uF273" : "\uF188";
+      const slugStr = padOrTrunc(`${sourceIcon} ${idStr}`, slugW);
       const titleStr = padOrTrunc(issue.title, rowTitleW);
 
       // State/Level column
       let typeCol: string;
       if (issue.source === "plane") {
-        typeCol = hexToAnsi(
+        typeCol = statePill(
           issue.state_hex ?? "#808080",
-          padOrTrunc(issue.state_name ?? "?", stateW),
+          padOrTrunc(issue.state_name ?? "?", stateW - 2),
         );
       } else {
         typeCol = sentryLevelLabel(
@@ -553,9 +552,9 @@ export class UnifiedOverlay {
         );
       }
 
-      const timePrefix = isTimed ? ">" : isSelected ? ">" : " ";
-      const row = `${slugStr}  ${sourceStr}  ${titleStr}  ${typeCol}  ${subCol}`;
-      const rowVis = visibleWidth(`>${row}`);
+      const timePrefix = isTimed ? "\uF054" : isSelected ? "\uF054" : " ";
+      const row = `${slugStr}  ${titleStr}  ${typeCol}  ${subCol}`;
+      const rowVis = visibleWidth(`${timePrefix}${row}`);
 
       if (isSelected || isTimed) {
         const content = isSelected
@@ -586,7 +585,7 @@ export class UnifiedOverlay {
     if (endIdx < this.filteredIssues.length) {
       const remaining = this.filteredIssues.length - endIdx;
       const indicator = padOrTrunc(
-        `\u2193 ${remaining} more`,
+        `\uF103 ${remaining} more`,
         innerW,
       );
       lines.push(
@@ -601,7 +600,7 @@ export class UnifiedOverlay {
 
     // ── footer ───────────────────────────────────────────────────
     const footer = padOrTrunc(
-      "\u2191\u2193 scroll  Enter preview  s start/stop (Plane)  f filter  Ctrl+Enter open  c copy  Esc close",
+      "\uF102 \uF103 scroll  Enter preview  s start/stop (Plane)  f filter  Ctrl+Enter open  c copy  Esc close",
       innerW,
     );
     lines.push(B("\u2502") + t.fg("dim", footer) + B("\u2502"));
@@ -629,7 +628,8 @@ export class UnifiedOverlay {
           ? `${this.projectIdentifier}-${issue.sequence_id}`
           : `#${issue.sequence_id}`
         : `Sentry #${issue.sentry_id}`;
-    const title = `\u25C9: ${id}`;
+    const icon = issue.source === "plane" ? "\uF273" : "\uF188";
+    const title = `${icon}: ${id}`;
     const topDash = Math.max(0, innerW - title.length - 3);
     lines.push(
       B("\u250C\u2500 ") +
@@ -651,7 +651,7 @@ export class UnifiedOverlay {
 
     // ── meta ─────────────────────────────────────────────────────
     if (issue.source === "plane") {
-      const coloredState = hexToAnsi(
+      const coloredState = statePill(
         issue.state_hex ?? "#808080",
         issue.state_name ?? "?",
       );
@@ -707,7 +707,7 @@ export class UnifiedOverlay {
 
     if (issue.source === "plane") {
       // Description
-      const descHdr = padOrTrunc("Description:", innerW);
+      const descHdr = padOrTrunc("\uF040 Description:", innerW);
       contentLines.push(descHdr);
       contentLines.push("");
       const desc = issue.description || "(no description)";
@@ -719,7 +719,7 @@ export class UnifiedOverlay {
       const entries = this.getTimeEntriesForIssue(issue.id!);
       if (entries.length > 0) {
         contentLines.push("");
-        contentLines.push("Time Entries:");
+        contentLines.push("\uF252 Time Entries:");
 
         const numW = 3;
         const timeW = 13;
@@ -846,7 +846,7 @@ export class UnifiedOverlay {
                   | Array<Record<string, unknown>>
                   | undefined;
                 if (!frames) continue;
-                contentLines.push("Stack frames:");
+                contentLines.push("\uF121 Stack frames:");
                 for (const f of frames.slice(-15)) {
                   const ctxArr = f.context as
                     | Array<[number, string]>
@@ -872,7 +872,7 @@ export class UnifiedOverlay {
             >;
             if (crumbs.length > 0) {
               contentLines.push(
-                `Breadcrumbs (${crumbs.length}):`,
+                `\uF0F1 Breadcrumbs (${crumbs.length}):`,
               );
               for (const bc of crumbs.slice(-10)) {
                 contentLines.push(
@@ -891,7 +891,7 @@ export class UnifiedOverlay {
             >;
             if (req.url || req.method) {
               contentLines.push(
-                `Request: ${req.method ?? "GET"} ${req.url ?? ""}`,
+                `\uF0EC Request: ${req.method ?? "GET"} ${req.url ?? ""}`,
               );
               contentLines.push("");
             }
@@ -930,7 +930,7 @@ export class UnifiedOverlay {
     }
 
     if (endIdx < contentLines.length) {
-      const indicator = `\u2193 ${contentLines.length - endIdx} more lines`;
+      const indicator = `\uF103 ${contentLines.length - endIdx} more lines`;
       const indPad = Math.max(0, innerW - indicator.length);
       lines.push(
         B("\u2502") +
@@ -947,7 +947,7 @@ export class UnifiedOverlay {
 
     // ── footer ───────────────────────────────────────────────────
     const footer = padOrTrunc(
-      "Esc back  \u2191\u2193 scroll  Ctrl+Enter open  c copy",
+      "Esc back  \uF102 \uF103 scroll  Ctrl+Enter open  c copy",
       innerW,
     );
     lines.push(B("\u2502") + t.fg("dim", footer) + B("\u2502"));

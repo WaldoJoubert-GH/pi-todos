@@ -28,12 +28,16 @@ Test locally without tagging:
 pi -e ./extensions/index.ts
 ```
 
+## Requirements
+
+- **Nerd Font** (e.g. FiraCode Nerd Font) — required for TUI icons. There is no fallback to vanilla Unicode.
+
 ## What you get
 
 - **`/issues`** — interactive TUI overlay listing all active Plane issues and pulled Sentry errors, with keyboard navigation, detail preview, browser open, and copy-to-clipboard. Filter by source with the `f` key.
 - **`/todos`** — backward-compatible alias for `/issues`
 - **`/pull-sentry <id>`** — fetch a Sentry issue by ID or URL, saved to `.dev/sentry/<id>.json` and added to the unified issues list
-- **Issues widget** — always-visible status bar showing Plane issue counts by state + Sentry issue count
+- **Issues widget** — always-visible status bar showing Plane issue counts by state + Sentry issue count, with Nerd Font icons
 - **`get_todos` tool** — lets the LLM read your unified issue list (Plane + Sentry) when you ask about it
 - **`fetch_sentry_issue` tool** — lets the LLM pull Sentry issue details directly
 - **Background sync** — Plane cache refreshes every 5 minutes while pi is running

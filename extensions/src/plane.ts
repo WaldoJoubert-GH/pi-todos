@@ -75,6 +75,25 @@ export function hexToAnsi(hex: string, text: string): string {
   return `\x1b[38;2;${r};${g};${b}m${text}\x1b[0m`;
 }
 
+function relativeLuminance(r: number, g: number, b: number): number {
+  return (0.299 * r + 0.587 * g + 0.114 * b) / 255;
+}
+
+/** Render a State as a background-filled pill with auto-contrast text. */
+export function statePill(hex: string, text: string): string {
+  const raw = hex.replace("#", "");
+  if (raw.length !== 6) return text;
+  const r = parseInt(raw.slice(0, 2), 16);
+  const g = parseInt(raw.slice(2, 4), 16);
+  const b = parseInt(raw.slice(4, 6), 16);
+  if (isNaN(r) || isNaN(g) || isNaN(b)) return text;
+  const padded = ` ${text} `;
+  const fgR = relativeLuminance(r, g, b) > 0.5 ? 0 : 255;
+  const fgG = fgR;
+  const fgB = fgR;
+  return `\x1b[38;2;${fgR};${fgG};${fgB};48;2;${r};${g};${b}m${padded}\x1b[0m`;
+}
+
 export function priorityLabel(priority: string): string {
   const label = priority || "none";
   const hex = PRIORITY_COLORS[label] ?? PRIORITY_COLORS.none;

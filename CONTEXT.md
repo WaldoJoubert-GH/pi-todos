@@ -23,8 +23,12 @@ A compact rendering of a State name for the widget, formed by taking the first c
 _Avoid_: Short name, acronym (it's a mechanical derivation, not a human-chosen label)
 
 **State Hex**:
-The per-State hex color defined in Plane (e.g., `#FF6B6B`). Used as an exact ANSI true-color foreground for TUI rendering. Fixed to Plane's branding — does not respond to theme changes.
+The per-State hex color defined in Plane (e.g., `#FF6B6B`). Used as a filled background pill with auto-contrasting text — black on light hexes, white on dark hexes. Fixed to Plane's branding — does not respond to theme changes.
 _Avoid_: State color (ambiguous with theme tokens)
+
+**State Pill**:
+The visual rendering of a State as a background-filled, padded label. The fill color is the State Hex; the text color is auto-selected (black or white) based on the hex's relative luminance. Each side of the label has a single-space padding. Used on the widget, overlay list, and overlay detail view.
+_Avoid_: State badge, state chip, state tag
 
 **Active**:
 An Issue whose State belongs to any group other than `completed` or `cancelled`. Backlog, unstarted, started, and triage issues are considered active.
@@ -39,7 +43,7 @@ A Plane issue priority level: `urgent`, `high`, `medium`, `low`, or `none`. Rend
 _Avoid_: Severity, importance
 
 **Widget**:
-The always-visible status bar showing issue counts per State with their Plane colors, plus the Running Entry when one is active. Now also shows a Sentry issue count alongside the Plane count.
+The always-visible status bar showing issue counts per State with their Plane colors, plus the Running Entry when one is active. Uses Nerd Font icons: `` (nf-fa-tasks) for Plane count, `` (nf-fa-bug) for Sentry count, `` (nf-fa-check_circle) for zero-state, `` (nf-fa-exclamation_triangle) for sync errors, `` (nf-fa-clock_o) for the Running Entry timer, and `` (nf-fa-download) for update notifications.
 _Avoid_: Status bar, pill bar
 
 **Time Entry**:
@@ -63,8 +67,12 @@ The total time spent on a Plane Issue — the sum of all stopped Time Entry dura
 _Avoid_: Total time, tracked time, logged time
 
 **Overlay**:
-The interactive TUI layer opened by `/issues` (or `/todos` as an alias) with a unified list view and detail view. `s` toggles a Time Entry on the highlighted Plane Issue. The timed issue shows a `⏱` indicator. `f` toggles the filter between all, plane-only, and sentry-only views.
+The interactive TUI layer opened by `/issues` (or `/todos` as an alias) with a unified list view and detail view. `s` toggles a Time Entry on the highlighted Plane Issue. The timed issue and selected row show a `` (nf-fa-chevron_right) cursor. `f` toggles the filter between all, plane-only, and sentry-only views.
 _Avoid_: Popup, modal
+
+**Nerd Font**:
+All TUI icons use Nerd Font (FiraCode Nerd Font) codepoints from the Private Use Area. There is no fallback to vanilla Unicode — a Nerd Font-patched monospace font is required. Icons used include `` (nf-fa-tasks for Plane items), `` (nf-fa-bug for Sentry items), `` (nf-fa-exclamation_triangle for warnings), `` (nf-fa-clock_o for timers), `` (nf-fa-download for updates), `` (nf-fa-check_circle for zero-state), `` (nf-fa-edit), `` (nf-fa-list_ol), `` (nf-fa-history), `` (nf-fa-exchange), and `` `` `` (chevron/angle navigation arrows).
+_Avoid_: Unicode icons, ASCII fallback
 
 ### Sentry
 
