@@ -1,8 +1,10 @@
-# Todos
+# Dev Hub
 
-Plane.so issue integration for pi — fetches, caches, and displays active (non-completed) issues as a TUI overlay and widget.
+Plane.so todo and Sentry issue integration for pi — unified under a shared `.dev/` directory with a common `issues.json` list file and a single `/issues` TUI overlay.
 
 ## Language
+
+### Plane
 
 **Issue**:
 A Plane.so work item with a unique ID, sequence number, title, description, state, and priority.
@@ -37,11 +39,11 @@ A Plane issue priority level: `urgent`, `high`, `medium`, `low`, or `none`. Rend
 _Avoid_: Severity, importance
 
 **Widget**:
-The always-visible status bar showing issue counts per State with their Plane colors, plus the Running Entry when one is active.
+The always-visible status bar showing issue counts per State with their Plane colors, plus the Running Entry when one is active. Now also shows a Sentry issue count alongside the Plane count.
 _Avoid_: Status bar, pill bar
 
 **Time Entry**:
-A record of time spent on a single Issue, consisting of a start timestamp and an optional stop timestamp. Only one Time Entry may be active (un-stopped) at a time across the workspace.
+A record of time spent on a single Plane Issue, consisting of a start timestamp and an optional stop timestamp. Only one Time Entry may be active (un-stopped) at a time across the workspace. Does not apply to Sentry Issues.
 _Avoid_: Timer, clock, stopwatch, tracker
 
 **Running Entry**:
@@ -49,7 +51,7 @@ The single Time Entry that is currently in progress — started but not yet stop
 _Avoid_: Active timer, current timer, live session
 
 **Time Entry Store**:
-The local JSON file (`.todo/time-entries.json`) containing all Time Entries. Distinct from the Plane-synced cache — Time Entries are local-only and do not sync to Plane. The Running Entry survives pi restarts. If the timed Issue disappears from the Plane cache (completed or deleted), the Running Entry persists with a `⚠️` warning prefix until manually stopped.
+The local JSON file (`.dev/time-entries.json`) containing all Time Entries. Distinct from the Plane-synced cache — Time Entries are local-only and do not sync to Plane. The Running Entry survives pi restarts. If the timed Issue disappears from the issues list (completed or deleted), the Running Entry persists with a warning prefix until manually stopped.
 _Avoid_: Time log, timesheet, timer file
 
 **Elapsed**:
@@ -57,43 +59,45 @@ The live duration of a Running Entry, displayed in compact human form on the Wid
 _Avoid_: Duration (ambiguous — could mean a stored, fixed duration of a stopped entry)
 
 **Accumulated Time**:
-The total time spent on an Issue — the sum of all stopped Time Entry durations plus the current Elapsed if it's the Running Entry. Displayed in the detail view meta line as `Total: Xh Ym Zs`.
+The total time spent on a Plane Issue — the sum of all stopped Time Entry durations plus the current Elapsed if it's the Running Entry. Not applicable to Sentry Issues.
 _Avoid_: Total time, tracked time, logged time
 
 **Overlay**:
-The interactive TUI layer opened by `/todos` with a list view and detail view. `s` toggles a Time Entry on the highlighted Issue (or the detail Issue when in detail view). The timed issue shows a `⏱` indicator in the list. The detail meta line shows accumulated time (`Total: Xh Ym Zs`) summing all stopped Time Entries for the issue plus the current Elapsed if running.
-_Avoid_: Popup, modal (it's an overlay in pi's component model)
+The interactive TUI layer opened by `/issues` (or `/todos` as an alias) with a unified list view and detail view. `s` toggles a Time Entry on the highlighted Plane Issue. The timed issue shows a `⏱` indicator. `f` toggles the filter between all, plane-only, and sentry-only views.
+_Avoid_: Popup, modal
 
-## Example dialogue
+### Sentry
 
-> **Dev**: When I open `/todos`, I see "In Progress" and "Review" in the list — both are `started` group. Should they have the same color?
->
-> **Domain expert**: No — each State has its own hex color in Plane. "In Progress" might be orange, "Review" might be blue. The TUI should show those exact colors, not group-level colors.
->
-> **Dev**: So the widget pills should break down by State, not by group?
->
-> **Domain expert**: Exactly. Group determines the sort order, but each pill is a State with its own count and color.
->
-> **Dev**: What if a State has no color set in Plane?
->
-> **Domain expert**: Fall back to neutral gray.
->
-> **Dev**: How do I reference an issue when talking to a colleague?
->
-> **Domain expert**: Use the Slug-ID, like `PITODOS-1`. It's globally unique within the workspace and copyable with `c` in the overlay.
->
-> **Dev**: What if the project identifier hasn't been fetched yet?
->
-> **Domain expert**: Fall back to the bare sequence number like `#1` until the identifier arrives.
->
-> **Dev**: I started timing PITODOS-3, then accidentally pressed `s` on PITODOS-5. What happened to the entry for PITODOS-3?
->
-> **Domain expert**: It was automatically stopped. Only one Running Entry can exist at a time. PITODOS-3's Time Entry now has a stop timestamp and PITODOS-5 is the new Running Entry.
->
-> **Dev**: So if I press `s` on PITODOS-5 again, it stops?
->
-> **Domain expert**: Yes. Press `s` on the Running Entry to stop it, or on any other Issue to switch. Toggle semantics — same key, context-dependent behavior.
->
-> **Dev**: I closed pi while timing PITODOS-3. When I reopen, does the timer reset?
->
-> **Domain expert**: No — the Running Entry survives restarts. The Elapsed will include the time pi was closed, since the start timestamp is preserved in the Time Entry Store.
+**Sentry Issue**:
+A Sentry error/exception group identified by a numeric ID, with a title, level, status, first/last seen timestamps, event count, culprit, and permalink. Pulled on demand via `/pull-sentry <id>`.
+_Avoid_: Error, exception, crash
+
+**Level**:
+Sentry severity classification: `fatal`, `error`, `warning`, `info`, `debug`. Rendered as a color-coded label in the overlay.
+_Avoid_: Severity, log level
+
+**Sentry Status**:
+Sentry resolution state: `unresolved`, `resolved`, `ignored`. Displayed in the unified overlay list and detail views.
+_Avoid_: State (reserved for Plane)
+
+**Pull**:
+The act of fetching a Sentry Issue from the Sentry API and saving it locally. A Pull writes two things: a summary entry in `issues.json` and a full detail file in `.dev/sentry/<id>.json`. Pulls are manual — there is no automatic Sentry sync.
+_Avoid_: Fetch, download, import
+
+**Sentry Detail File**:
+A JSON file at `.dev/sentry/<id>.json` containing the full Sentry issue payload: stack trace, breadcrumbs, tags, request context, and exception data. Referenced by the summary entry in `issues.json` via `detail_file`. Too large to inline.
+_Avoid_: Full payload, raw issue
+
+### Shared
+
+**Dev Directory** (`.dev/`):
+The shared data directory for this extension's local files: config, issues list, time entries, and sentry detail files. Gitignored entirely.
+_Avoid_: Data dir, cache dir, .pi-data
+
+**Dev Config** (`.dev/config.json`):
+A namespaced JSON file with `plane` and `sentry` sections, each containing the connection details for that service. A user can configure zero, one, or both services.
+_Avoid_: Settings, project config (ambiguous)
+
+**Issues File** (`issues.json`):
+The unified list of all tracked items — Plane Issues and pulled Sentry Issues — with a `source` discriminator. Plane entries are rewritten on each sync; Sentry entries are appended/updated on each Pull. The TUI overlay reads exclusively from this file.
+_Avoid_: Cache, todo list, issue index
