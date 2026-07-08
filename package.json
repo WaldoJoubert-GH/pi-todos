@@ -1,6 +1,6 @@
 {
   "name": "pi-todos",
-  "version": "1.2.5",
+  "version": "1.2.6",
   "description": "Plane.so todo list integration for pi",
   "keywords": [
     "pi-package"

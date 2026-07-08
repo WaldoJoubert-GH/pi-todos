@@ -5,9 +5,11 @@ import {
   loadIssues,
   resolvePlaneConfig,
   resolveSentryConfig,
+  resolveAutotaskConfig,
   loadTimeEntries,
   loadDevConfig,
   updatePlaneConfig,
+  readAutotaskCache,
 } from "./src/config.js";
 import type { UnifiedIssue, PlaneCache, TimeEntry } from "./src/types.js";
 import {
@@ -23,6 +25,8 @@ import {
   getCurrentVersionPublic,
   getPackageRepoUrlPublic,
   formatPlaneForTool,
+  formatDuration,
+  formatTimestamp,
 } from "./src/plane.js";
 import {
   ensureSentrySetup,
@@ -32,8 +36,18 @@ import {
   upsertSentryUnifiedIssue,
   formatSentrySummary,
 } from "./src/sentry.js";
-import { UnifiedOverlay, buildWidgetLines } from "./src/tui.js";
+import { UnifiedOverlay, TimesOverlay, buildWidgetLines } from "./src/tui.js";
 import { registerTools } from "./src/tools.js";
+import {
+  ensureAutotaskSetup,
+  fetchAutotaskTimeEntries,
+  syncAutotask,
+  buildDashboard,
+  getTodayDateString,
+  AUTOTASK_SYNC_INTERVAL_MS,
+  formatAutotaskForTool,
+} from "./src/autotask.js";
+import type { ResolvedAutotaskConfig } from "./src/types.js";
 
 // ── extension state ──────────────────────────────────────────────────
 
@@ -45,6 +59,9 @@ let timeEntryState: TimeEntry[] = [];
 let widgetTimerInterval: ReturnType<typeof setInterval> | null = null;
 let lastPlaneCache: PlaneCache | null = null;
 let updateAvailableVersion: string | null = null;
+let autotaskTotalHours: number | null = null;
+let autotaskSyncTimer: ReturnType<typeof setInterval> | null = null;
+let autotaskConfigForSync: ResolvedAutotaskConfig | null = null;
 
 // ── widget timer ─────────────────────────────────────────────────────
 
@@ -87,6 +104,7 @@ function refreshWidget(ctx: {
       missing,
       updateAvailableVersion,
       getPackageRepoUrlPublic(),
+      autotaskTotalHours,
     ),
   );
 }
@@ -165,7 +183,53 @@ function startSync(ctx: {
   syncTimer = setInterval(() => doSync(ctx), SYNC_INTERVAL_MS);
 }
 
+// ── autotask sync ────────────────────────────────────────────────────
+
+let syncingAutotask = false;
+
+async function doAutotaskSync(ctx: {
+  ui: { setWidget: (name: string, lines: string[]) => void };
+  cwd: string;
+}): Promise<void> {
+  if (syncingAutotask || !autotaskConfigForSync) return;
+  syncingAutotask = true;
+
+  try {
+    const date = getTodayDateString(autotaskConfigForSync.utcOffset);
+    const cache = await syncAutotask(
+      ctx.cwd,
+      autotaskConfigForSync,
+      date,
+    );
+    if (cache) {
+      autotaskTotalHours = cache.items.reduce(
+        (sum, i) => sum + i.hoursWorked,
+        0,
+      );
+      refreshWidget(ctx);
+    }
+  } finally {
+    syncingAutotask = false;
+  }
+}
+
+function startAutotaskSync(ctx: {
+  ui: { setWidget: (name: string, lines: string[]) => void };
+  cwd: string;
+}): void {
+  if (autotaskSyncTimer) return;
+  doAutotaskSync(ctx);
+  autotaskSyncTimer = setInterval(
+    () => doAutotaskSync(ctx),
+    AUTOTASK_SYNC_INTERVAL_MS,
+  );
+}
+
 // ── overlay display ──────────────────────────────────────────────────
+
+interface TuiHandle {
+  requestRender: () => void;
+}
 
 async function showOverlay(
   ctx: never,
@@ -188,7 +252,7 @@ async function showOverlay(
 
   await ui.ui.custom(
     (
-      _tui: unknown,
+      tui: TuiHandle,
       theme: {
         fg: (color: string, text: string) => string;
         bg: (color: string, text: string) => string;
@@ -212,7 +276,78 @@ async function showOverlay(
         cwd,
       );
       overlayComponent = component;
-      return component;
+      return {
+        render: (w: number) => component.render(w),
+        invalidate: () => component.invalidate(),
+        handleInput: (data: string) => {
+          component.handleInput(data);
+          component.invalidate();
+          tui.requestRender();
+        },
+      };
+    },
+    {
+      overlay: true,
+      onHandle: (handle: { close: () => void }) => {
+        overlayHandle = handle;
+      },
+    },
+  );
+
+  overlayComponent = null;
+  overlayHandle = null;
+}
+
+// ── times overlay display ──────────────────────────────────────────
+
+async function showTimesOverlay(
+  ctx: never,
+  initialRows: import("./src/autotask.js").DashboardRow[],
+  initialTotal: number,
+  atCfg: ResolvedAutotaskConfig,
+  setWidget: (name: string, lines: string[]) => void,
+  syncError: string | null,
+): Promise<void> {
+  const ui = ctx as unknown as {
+    ui: {
+      custom: (
+        factory: (...args: unknown[]) => unknown,
+        opts: {
+          overlay: boolean;
+          onHandle?: (h: { close: () => void }) => void;
+        },
+      ) => Promise<null>;
+    };
+  };
+
+  await ui.ui.custom(
+    (
+      tui: TuiHandle,
+      theme: {
+        fg: (color: string, text: string) => string;
+        bg: (color: string, text: string) => string;
+      },
+      _keybindings: unknown,
+      done: (result: null) => void,
+    ) => {
+      const component = new TimesOverlay(
+        initialRows,
+        initialTotal,
+        theme,
+        () => done(null),
+        atCfg.utcOffset,
+        syncError,
+      );
+      overlayComponent = component as unknown as UnifiedOverlay;
+      return {
+        render: (w: number) => component.render(w),
+        invalidate: () => component.invalidate(),
+        handleInput: (data: string) => {
+          component.handleInput(data);
+          component.invalidate();
+          tui.requestRender();
+        },
+      };
     },
     {
       overlay: true,
@@ -332,6 +467,22 @@ export default function (pi: ExtensionAPI) {
         refreshWidget(ctx);
       }
     });
+
+    // ── initialize autotask sync ────────────────────────────────
+    const atCfg = resolveAutotaskConfig(ctx.cwd);
+    if (atCfg) {
+      autotaskConfigForSync = atCfg;
+      const date = getTodayDateString(atCfg.utcOffset);
+      const existing = readAutotaskCache(ctx.cwd, date);
+      if (existing) {
+        autotaskTotalHours = existing.items.reduce(
+          (sum, i) => sum + i.hoursWorked,
+          0,
+        );
+        refreshWidget(ctx);
+      }
+      startAutotaskSync(ctx);
+    }
   });
 
   // ── register tools ────────────────────────────────────────────
@@ -643,11 +794,116 @@ export default function (pi: ExtensionAPI) {
     },
   });
 
+  // ── command: /times ─────────────────────────────────────────
+  pi.registerCommand("times", {
+    description:
+      "Show today's time entries from Autotask and local tracking",
+    handler: async (_args: string, ctx) => {
+      // Resolve or set up autotask config
+      const atCfg = await ensureAutotaskSetup(ctx);
+      if (!atCfg) return;
+
+      if (!ctx.hasUI) {
+        // Non-interactive: fetch and print
+        const date = getTodayDateString(atCfg.utcOffset);
+        const { items, error } = await fetchAutotaskTimeEntries(atCfg, date);
+        if (error) {
+          console.log(`Autotask API error: ${error}`);
+        } else {
+          console.log(formatAutotaskForTool(items, atCfg.utcOffset, date));
+        }
+
+        // Also show local time entries for today
+        const localToday = timeEntryState.filter((e) => {
+          const d = new Date(e.started_at);
+          const offsetMs = atCfg.utcOffset * 60 * 60 * 1000;
+          const local = new Date(d.getTime() + offsetMs);
+          return local.toISOString().slice(0, 10) === date;
+        });
+        if (localToday.length > 0) {
+          console.log(`\n### Local Time Entries for ${date} (${localToday.length})\n`);
+          for (const le of localToday) {
+            const running = le.stopped_at === null;
+            const startMs = new Date(le.started_at).getTime();
+            const endMs = le.stopped_at
+              ? new Date(le.stopped_at).getTime()
+              : Date.now();
+            const dur = formatDuration(endMs - startMs);
+            const status = running ? " [running]" : "";
+            console.log(
+              `- #${le.sequence_id} ${le.title}  ${formatTimestamp(le.started_at)} → ${le.stopped_at ? formatTimestamp(le.stopped_at) : "now"}  ${dur}${status}`,
+            );
+          }
+        }
+        return;
+      }
+
+      // Interactive mode: show overlay
+      const date = getTodayDateString(atCfg.utcOffset);
+
+      // Start autotask background sync if not running
+      if (!autotaskSyncTimer) {
+        autotaskConfigForSync = atCfg;
+        startAutotaskSync(ctx);
+      }
+
+      // Fetch current data
+      const cache = await syncAutotask(ctx.cwd, atCfg, date);
+      let autotaskItems = cache?.items ?? [];
+      let syncError: string | null = null;
+
+      if (!cache) {
+        // Try reading existing cache as fallback
+        const existing = readAutotaskCache(ctx.cwd, date);
+        if (existing) {
+          autotaskItems = existing.items;
+          syncError = "Using cached data — API refresh failed";
+        } else {
+          syncError = "Failed to fetch Autotask data";
+        }
+      }
+
+      // Update total hours for widget
+      autotaskTotalHours = autotaskItems.reduce(
+        (sum, i) => sum + i.hoursWorked,
+        0,
+      );
+      refreshWidget(ctx);
+
+      // Build initial dashboard
+      const rows = buildDashboard(
+        autotaskItems,
+        timeEntryState,
+        atCfg.utcOffset,
+        date,
+      );
+      const totalHours = rows.reduce(
+        (sum, r) =>
+          sum + (r.hoursWorked ?? r.durationMs / 3600000),
+        0,
+      );
+
+      // Show overlay with date-change handler
+      await showTimesOverlay(
+        ctx as never,
+        rows,
+        totalHours,
+        atCfg,
+        (name, lines) => ctx.ui.setWidget(name, lines),
+        syncError,
+      );
+    },
+  });
+
   // ── cleanup ──────────────────────────────────────────────────
   pi.on("session_shutdown", async () => {
     if (syncTimer) {
       clearInterval(syncTimer);
       syncTimer = null;
+    }
+    if (autotaskSyncTimer) {
+      clearInterval(autotaskSyncTimer);
+      autotaskSyncTimer = null;
     }
     stopWidgetTimer();
     overlayComponent = null;

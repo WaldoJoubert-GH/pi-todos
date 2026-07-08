@@ -40,6 +40,7 @@ export interface IssuesFile {
 export interface DevConfig {
   plane?: PlaneConfig;
   sentry?: SentryConfig;
+  autotask?: AutotaskConfig;
 }
 
 export interface PlaneConfig {
@@ -125,4 +126,39 @@ export interface ResolvedSentryConfig {
   token: string;
   org_slug: string;
   project_slug: string;
+}
+
+// ── Autotask types ──────────────────────────────────────────────────
+
+export interface AutotaskTimeRecord {
+  id: number;
+  ticketID: number;
+  startDateTime: string;
+  endDateTime: string;
+  hoursWorked: number;
+  hoursToBill: number;
+  summaryNotes: string;
+  isNonBillable: boolean;
+  dateWorked: string;
+}
+
+export interface AutotaskConfig {
+  resourceId: number;
+  apiBaseUrl?: string;
+  utcOffset?: number;
+}
+
+export interface ResolvedAutotaskConfig {
+  integrationCode: string;
+  username: string;
+  secret: string;
+  resourceId: number;
+  apiBaseUrl: string;
+  utcOffset: number;
+}
+
+export interface AutotaskCache {
+  fetched_at: string;
+  date: string;
+  items: AutotaskTimeRecord[];
 }

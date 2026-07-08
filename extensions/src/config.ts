@@ -8,6 +8,8 @@ import type {
   TimeEntryStore,
   ResolvedPlaneConfig,
   ResolvedSentryConfig,
+  AutotaskCache,
+  ResolvedAutotaskConfig,
 } from "./types.js";
 
 // ── secrets ─────────────────────────────────────────────────────────
@@ -15,6 +17,7 @@ import type {
 const HOME_SECRETS = path.join(os.homedir(), ".pi", "agent", "secrets");
 const PLANE_SECRETS_FILE = path.join(HOME_SECRETS, "plane.json");
 const SENTRY_SECRETS_FILE = path.join(HOME_SECRETS, "sentry.json");
+const AUTOTASK_SECRETS_FILE = path.join(HOME_SECRETS, "autotask.json");
 
 export function loadPlaneToken(): string | null {
   try {
@@ -48,6 +51,36 @@ export function loadSentryToken(): string | null {
 export function saveSentryToken(token: string): void {
   fs.mkdirSync(path.dirname(SENTRY_SECRETS_FILE), { recursive: true });
   fs.writeFileSync(SENTRY_SECRETS_FILE, JSON.stringify({ token }, null, 2), "utf-8");
+}
+
+export function loadAutotaskSecrets(): { integrationCode: string; username: string; secret: string } | null {
+  try {
+    const raw = fs.readFileSync(AUTOTASK_SECRETS_FILE, "utf-8");
+    const data = JSON.parse(raw);
+    if (
+      typeof data.integrationCode === "string" && data.integrationCode.length > 0 &&
+      typeof data.username === "string" && data.username.length > 0 &&
+      typeof data.secret === "string" && data.secret.length > 0
+    ) {
+      return {
+        integrationCode: data.integrationCode,
+        username: data.username,
+        secret: data.secret,
+      };
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+export function saveAutotaskSecrets(integrationCode: string, username: string, secret: string): void {
+  fs.mkdirSync(path.dirname(AUTOTASK_SECRETS_FILE), { recursive: true });
+  fs.writeFileSync(
+    AUTOTASK_SECRETS_FILE,
+    JSON.stringify({ integrationCode, username, secret }, null, 2),
+    "utf-8",
+  );
 }
 
 // ── .dev/ directory helpers ─────────────────────────────────────────
@@ -122,6 +155,15 @@ export function updateSentryConfig(
   saveDevConfig(cwd, cfg);
 }
 
+export function updateAutotaskConfig(
+  cwd: string,
+  autotask: NonNullable<DevConfig["autotask"]>,
+): void {
+  const cfg = loadDevConfig(cwd);
+  cfg.autotask = autotask;
+  saveDevConfig(cwd, cfg);
+}
+
 // ── resolve runtime configs ─────────────────────────────────────────
 
 export function resolvePlaneConfig(cwd: string): ResolvedPlaneConfig | null {
@@ -134,6 +176,47 @@ export function resolvePlaneConfig(cwd: string): ResolvedPlaneConfig | null {
     project_id: cfg.plane.project_id,
     project_identifier: cfg.plane.project_identifier,
   };
+}
+
+export function resolveAutotaskConfig(cwd: string): ResolvedAutotaskConfig | null {
+  const secrets = loadAutotaskSecrets();
+  const cfg = loadDevConfig(cwd);
+  if (!secrets || !cfg.autotask) return null;
+  const utcOffset = cfg.autotask.utcOffset ?? -new Date().getTimezoneOffset() / 60;
+  return {
+    integrationCode: secrets.integrationCode,
+    username: secrets.username,
+    secret: secrets.secret,
+    resourceId: cfg.autotask.resourceId,
+    apiBaseUrl: cfg.autotask.apiBaseUrl ?? "https://webservices16.autotask.net",
+    utcOffset,
+  };
+}
+
+// ── autotask cache ─────────────────────────────────────────────────
+
+export function autotaskDir(cwd: string): string {
+  const dir = path.join(devDir(cwd), "autotask");
+  fs.mkdirSync(dir, { recursive: true });
+  return dir;
+}
+
+export function autotaskCachePath(cwd: string, date: string): string {
+  return path.join(autotaskDir(cwd), `${date}.json`);
+}
+
+export function readAutotaskCache(cwd: string, date: string): AutotaskCache | null {
+  try {
+    const raw = fs.readFileSync(autotaskCachePath(cwd, date), "utf-8");
+    return JSON.parse(raw) as AutotaskCache;
+  } catch {
+    return null;
+  }
+}
+
+export function writeAutotaskCache(cwd: string, cache: AutotaskCache): void {
+  ensureDevDir(cwd);
+  fs.writeFileSync(autotaskCachePath(cwd, cache.date), JSON.stringify(cache, null, 2), "utf-8");
 }
 
 export function resolveSentryConfig(cwd: string): ResolvedSentryConfig | null {

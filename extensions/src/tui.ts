@@ -3,7 +3,10 @@ import type {
   IssueSource,
   PlaneCache,
   TimeEntry,
+  AutotaskTimeRecord,
+  AutotaskCache,
 } from "./types.js";
+import type { DashboardRow } from "./autotask.js";
 import {
   hexToAnsi,
   statePill,
@@ -129,10 +132,11 @@ export function buildWidgetLines(
   missingIssue: boolean,
   updateVersion: string | null,
   repoUrl: string | null,
+  autotaskTotalHours?: number | null,
 ): string[] {
   const lines: string[] = [];
 
-  // Line 1: counts line
+  // Line 1: counts line (with autotask)
   const parts: string[] = [];
   if (planeCache && planeCache.total_active > 0) {
     const planeIcon = planeCache.sync_error ? "\uF06A " : "\uF273 ";
@@ -177,6 +181,13 @@ export function buildWidgetLines(
     }
   }
 
+  // Autotask total hours
+  if (autotaskTotalHours != null && autotaskTotalHours > 0) {
+    parts.push(
+      `\uF251 ${autotaskTotalHours.toFixed(1)}h tracked`,
+    );
+  }
+
   // Running entry line
   if (runningEntry) {
     const prefix = missingIssue ? "\uF06A " : "\uF252 ";
@@ -216,6 +227,8 @@ export class UnifiedOverlay {
   private visibleHeight = 0;
   private detailIssue: UnifiedIssue | null = null;
   private detailScroll = 0;
+  private cachedWidth?: number;
+  private cachedLines?: string[];
   private projectIdentifier: string | null;
   private theme: {
     fg: (color: string, text: string) => string;
@@ -271,6 +284,7 @@ export class UnifiedOverlay {
   updateIssues(issues: UnifiedIssue[]): void {
     this.allIssues = issues;
     this.applyFilter();
+    this.invalidate();
   }
 
   private applyFilter(): void {
@@ -285,6 +299,7 @@ export class UnifiedOverlay {
     this.scrollOffset = 0;
     this.detailIssue = null;
     this.detailScroll = 0;
+    this.invalidate();
   }
 
   handleInput(data: string): void {
@@ -402,8 +417,15 @@ export class UnifiedOverlay {
   }
 
   render(width: number): string[] {
+    if (this.cachedLines && this.cachedWidth === width) {
+      return this.cachedLines;
+    }
+
     if (this.detailIssue) {
-      return this.renderDetail(width);
+      const detailLines = this.renderDetail(width);
+      this.cachedWidth = width;
+      this.cachedLines = detailLines;
+      return detailLines;
     }
 
     const lines: string[] = [];
@@ -610,6 +632,8 @@ export class UnifiedOverlay {
       B("\u2514" + "\u2500".repeat(innerW) + "\u2518"),
     );
 
+    this.cachedWidth = width;
+    this.cachedLines = lines;
     return lines;
   }
 
@@ -961,6 +985,286 @@ export class UnifiedOverlay {
   }
 
   invalidate(): void {
-    // no cache to clear
+    this.cachedWidth = undefined;
+    this.cachedLines = undefined;
+  }
+}
+
+// ── Times Overlay ────────────────────────────────────────────────────
+
+export class TimesOverlay {
+  private rows: DashboardRow[] = [];
+  private selected = 0;
+  private scrollOffset = 0;
+  private visibleHeight = 0;
+  private cachedWidth?: number;
+  private cachedLines?: string[];
+  private theme: {
+    fg: (color: string, text: string) => string;
+    bg: (color: string, text: string) => string;
+  };
+  private onClose: () => void;
+  private totalHours: number;
+  private syncError: string | null;
+  private utcOffset: number;
+
+  constructor(
+    rows: DashboardRow[],
+    totalHours: number,
+    theme: {
+      fg: (color: string, text: string) => string;
+      bg: (color: string, text: string) => string;
+    },
+    onClose: () => void,
+    utcOffset: number,
+    syncError?: string | null,
+  ) {
+    this.rows = rows;
+    this.totalHours = totalHours;
+    this.theme = theme;
+    this.onClose = onClose;
+    this.utcOffset = utcOffset;
+    this.syncError = syncError ?? null;
+  }
+
+  updateData(
+    rows: DashboardRow[],
+    totalHours: number,
+    syncError?: string | null,
+  ): void {
+    this.rows = rows;
+    this.totalHours = totalHours;
+    this.syncError = syncError ?? null;
+    this.selected = 0;
+    this.scrollOffset = 0;
+    this.invalidate();
+  }
+
+  handleInput(data: string): void {
+    // List navigation
+    if (matchesKey(data, Key.up)) {
+      if (this.selected > 0) {
+        this.selected--;
+        this.ensureVisible();
+      }
+    } else if (matchesKey(data, Key.down)) {
+      if (this.selected < this.rows.length - 1) {
+        this.selected++;
+        this.ensureVisible();
+      }
+    } else if (matchesKey(data, Key.home)) {
+      this.selected = 0;
+      this.scrollOffset = 0;
+    } else if (matchesKey(data, Key.end)) {
+      this.selected = Math.max(0, this.rows.length - 1);
+      this.ensureVisible();
+    } else if (matchesKey(data, Key.escape)) {
+      this.onClose();
+    }
+  }
+
+  private ensureVisible(): void {
+    if (this.selected < this.scrollOffset) {
+      this.scrollOffset = this.selected;
+    } else if (
+      this.selected >=
+      this.scrollOffset + this.visibleHeight
+    ) {
+      this.scrollOffset = this.selected - this.visibleHeight + 1;
+    }
+  }
+
+  render(width: number): string[] {
+    if (this.cachedLines && this.cachedWidth === width) {
+      return this.cachedLines;
+    }
+
+    const lines: string[] = [];
+    const t = this.theme;
+    const B = (s: string) => t.fg("border", s);
+    const innerW = Math.max(1, width - 2);
+
+    // ── top border ───────────────────────────────────────────────
+    const dateStr = this.getLocalToday();
+    const errorIcon = this.syncError ? " \uF06A" : "";
+    const title = `Time \u2014 ${dateStr}${errorIcon} `;
+    const topDash = Math.max(0, innerW - title.length - 3);
+    lines.push(
+      B("\u250C\u2500 ") +
+        t.fg("accent", title) +
+        B(" " + "\u2500".repeat(topDash) + "\u2510"),
+    );
+
+    // ── sync error banner ────────────────────────────────────────
+    if (this.syncError) {
+      const errText = `  \uF06A ${this.syncError}`;
+      const errPad = Math.max(0, innerW - visibleWidth(errText));
+      lines.push(
+        B("\u2502") + t.fg("error", errText) + " ".repeat(errPad) + B("\u2502"),
+      );
+    }
+
+    // ── column headers ───────────────────────────────────────────
+    const timeW = 14;
+    const durW = 10;
+    const prefixW = 2;
+    const descW = innerW - timeW - durW - 4 - prefixW;
+
+    if (descW >= 10) {
+      const header =
+        padOrTrunc("Time", timeW) +
+        "  " +
+        padOrTrunc("Duration", durW) +
+        "  Description";
+      lines.push(
+        B("\u2502") + t.fg("muted", header) + B("\u2502"),
+      );
+      lines.push(
+        B("\u251C" + "\u2500".repeat(innerW) + "\u2524"),
+      );
+    } else {
+      lines.push(
+        B("\u2502") +
+          t.fg("muted", padOrTrunc("Terminal too narrow", innerW)) +
+          B("\u2502"),
+      );
+    }
+
+    // ── rows ─────────────────────────────────────────────────────
+    const maxVisible = Math.min(
+      25,
+      Math.max(5, Math.floor(innerW * 0.5)),
+    );
+    this.visibleHeight = maxVisible;
+
+    if (this.rows.length === 0) {
+      const empty = padOrTrunc(
+        "  (no time entries for this date)",
+        innerW,
+      );
+      lines.push(
+        B("\u2502") + t.fg("dim", empty) + B("\u2502"),
+      );
+    } else {
+      const endIdx = Math.min(
+        this.scrollOffset + maxVisible,
+        this.rows.length,
+      );
+      const displayRows = this.rows.slice(this.scrollOffset, endIdx);
+
+      for (let i = 0; i < displayRows.length; i++) {
+        const idx = this.scrollOffset + i;
+        const row = displayRows[i];
+        const isSelected = idx === this.selected;
+
+        const timeStr = padOrTrunc(
+          `${row.startTime} \u2192 ${row.endTime}`,
+          timeW,
+        );
+        const durStr = padOrTrunc(row.durationLabel, durW);
+
+        const descMax = Math.max(1, descW);
+        let descStr = row.description;
+        if (descStr.length > descMax) {
+          descStr = descStr.slice(0, descMax - 1) + "\u2026";
+        } else {
+          descStr = descStr.padEnd(descMax);
+        }
+
+        // Color coding
+        let timeColor: string;
+        let descColor: string;
+        let durColor: string;
+
+        if (row.source === "autotask") {
+          if (row.isNonBillable) {
+            timeColor = t.fg("dim", timeStr);
+            durColor = t.fg("dim", durStr);
+            descColor = t.fg("dim", descStr);
+          } else {
+            timeColor = timeStr;
+            durColor = durStr;
+            descColor = descStr;
+          }
+        } else {
+          // Local entry: cyan for non-running, bright cyan for running
+          timeColor = t.fg("info", timeStr);
+          durColor = t.fg("info", durStr);
+          descColor = t.fg("info", descStr);
+        }
+
+        const isRunning = row.source === "local" && row.isRunning;
+
+        // Chevron prefix: shown on selected row or running entry
+        const prefix = isSelected || isRunning ? "\uF054 " : "  ";
+
+        const rowContent = `${timeColor}  ${durColor}  ${descColor}`;
+
+        if (isSelected) {
+          const content = t.bg("selectedBg", t.fg("text", `${prefix}${rowContent}`));
+          const rowVis = visibleWidth(
+            `${prefix}${timeStr}  ${durStr}  ${descStr}`,
+          );
+          const padLen = Math.max(0, innerW - rowVis);
+          lines.push(
+            B("\u2502") + content + " ".repeat(padLen) + B("\u2502"),
+          );
+        } else {
+          const prefixColored = isRunning ? t.fg("info", prefix) : prefix;
+          const line = `${prefixColored}${rowContent}`;
+          const rowVis = visibleWidth(
+            `${prefix}${timeStr}  ${durStr}  ${descStr}`,
+          );
+          const padLen = Math.max(0, innerW - rowVis);
+          lines.push(
+            B("\u2502") + line + " ".repeat(padLen) + B("\u2502"),
+          );
+        }
+      }
+
+      // Scroll indicator
+      if (endIdx < this.rows.length) {
+        const remaining = this.rows.length - endIdx;
+        const indicator = padOrTrunc(
+          `\uF103 ${remaining} more`,
+          innerW,
+        );
+        lines.push(
+          B("\u2502") + t.fg("muted", indicator) + B("\u2502"),
+        );
+      }
+    }
+
+    // ── footer separator ─────────────────────────────────────────
+    lines.push(
+      B("\u251C" + "\u2500".repeat(innerW) + "\u2524"),
+    );
+
+    // ── footer ───────────────────────────────────────────────────
+    const totalStr = `Total: ${this.totalHours.toFixed(1)}h`;
+    const navStr = "Esc close";
+    const footer = padOrTrunc(`${totalStr}  \u00B7  ${navStr}`, innerW);
+    lines.push(B("\u2502") + t.fg("dim", footer) + B("\u2502"));
+
+    // ── bottom border ────────────────────────────────────────────
+    lines.push(
+      B("\u2514" + "\u2500".repeat(innerW) + "\u2518"),
+    );
+
+    this.cachedWidth = width;
+    this.cachedLines = lines;
+    return lines;
+  }
+
+  invalidate(): void {
+    this.cachedWidth = undefined;
+    this.cachedLines = undefined;
+  }
+
+  private getLocalToday(): string {
+    const now = new Date();
+    const offsetMs = this.utcOffset * 60 * 60 * 1000;
+    const local = new Date(now.getTime() + offsetMs);
+    return local.toISOString().slice(0, 10);
   }
 }

@@ -96,6 +96,36 @@ _Avoid_: Fetch, download, import
 A JSON file at `.dev/sentry/<id>.json` containing the full Sentry issue payload: stack trace, breadcrumbs, tags, request context, and exception data. Referenced by the summary entry in `issues.json` via `detail_file`. Too large to inline.
 _Avoid_: Full payload, raw issue
 
+### Autotask
+
+**Autotask Time Record**:
+A single time entry fetched from the Autotask API — has an Autotask `id`, `ticketID`, `startDateTime` / `endDateTime`, `hoursWorked`, `hoursToBill`, `summaryNotes`, and `isNonBillable`. Cached per-date in `.dev/autotask/<date>.json`. Distinct from the local Time Entry (which is stopwatch-based and keyed to a Plane issue).
+_Avoid_: Autotask entry, external time entry, timesheet row
+
+**Time Dashboard**:
+What the `/times` command renders — a unified chronological list of Autotask Time Records and local Time Entries for a given day, color-coded by source. Local entries render in cyan; Autotask entries in default foreground. Non-billable Autotask entries are dimmed. A Running Entry (un-stopped local) gets an active indicator. Navigable by day with `←`/`→` and `t` to return to today. Shows a footer with total hours summed across both sources.
+_Avoid_: Timesheet view, time list, day view
+
+**Autotask Config**:
+The four connection values for the Autotask REST API: API Integration Code, Username, and Secret live in `~/.pi/agent/secrets/autotask.json`. Resource ID and API Base URL live in `.dev/config.json` under the `autotask` key. The API Base URL defaults to `https://webservices16.autotask.net` and only needs to be set if the tenant moves to a different endpoint.
+_Avoid_: Autotask settings, PSA config
+
+**Autotask Cache**:
+A per-date JSON file at `.dev/autotask/<YYYY-MM-DD>.json` holding the raw Autotask API response for that date. Written on `/times` invocation and on the background 5-minute sync. The overlay reads from the current day's cache, falling back to a live API fetch.
+_Avoid_: Time entries file (reserved for `.dev/time-entries.json`), autotask dump
+
+**Autotask Setup Flow**:
+On first `/times` invocation when no Autotask Config exists, the user is interactively prompted for: API Integration Code, Username, Secret (saved to secrets file), and Resource ID (saved to dev config). Non-interactive mode prints setup instructions listing the required files and their JSON format — matching the Plane setup pattern.
+_Avoid_: Onboarding, first-run wizard
+
+**Non-Billable**:
+An Autotask Time Record where `isNonBillable` is `true`. Rendered in dim/gray text throughout the Time Dashboard to visually de-emphasise.
+_Avoid_: Unbillable, internal time
+
+**Billable**:
+An Autotask Time Record where `isNonBillable` is `false`. Rendered in normal-weight default foreground. Optionally prefixed with a `` (nf-fa-dollar) Nerd Font glyph for quick visual scan.
+_Avoid_: Chargeable, client time
+
 ### Shared
 
 **Dev Directory** (`.dev/`):
@@ -103,7 +133,7 @@ The shared data directory for this extension's local files: config, issues list,
 _Avoid_: Data dir, cache dir, .pi-data
 
 **Dev Config** (`.dev/config.json`):
-A namespaced JSON file with `plane` and `sentry` sections, each containing the connection details for that service. A user can configure zero, one, or both services.
+A namespaced JSON file with `plane`, `sentry`, and `autotask` sections, each containing the connection details for that service. A user can configure zero, one, two, or all three services.
 _Avoid_: Settings, project config (ambiguous)
 
 **Issues File** (`issues.json`):
