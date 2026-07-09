@@ -55,7 +55,7 @@ A Plane issue priority level: `urgent`, `high`, `medium`, `low`, or `none`. Rend
 _Avoid_: Severity, importance
 
 **Widget**:
-The always-visible status bar showing issue counts per State with their Plane colors, plus the Running Entry when one is active. Uses Nerd Font icons: `` (nf-fa-tasks) for Plane count, `` (nf-fa-bug) for Sentry count, `` (nf-fa-check_circle) for zero-state, `` (nf-fa-exclamation_triangle) for sync errors, `` (nf-fa-clock_o) for the Running Entry timer, and `` (nf-fa-download) for update notifications.
+The always-visible status bar showing issue counts per State with their Plane colors, the Daily Total, and the Running Entry when one is active. Uses Nerd Font icons: `` (nf-fa-tasks) for Plane count, `` (nf-fa-bug) for Sentry count, `` (nf-fa-clock-o) for Daily Total, `` (nf-fa-check_circle) for zero-state, `` (nf-fa-exclamation_triangle) for sync errors, `` (nf-fa-clock_o) for the Running Entry timer, and `` (nf-fa-download) for update notifications.
 _Avoid_: Status bar, pill bar
 
 **Time Entry**:
@@ -78,12 +78,16 @@ _Avoid_: Duration (ambiguous — could mean a stored, fixed duration of a stoppe
 The total time spent on a Plane Issue — the sum of all stopped Time Entry durations plus the current Elapsed if it's the Running Entry. Not applicable to Sentry Issues.
 _Avoid_: Total time, tracked time, logged time
 
+**Daily Total**:
+The combined time from local Time Entries and Autotask Time Records for the current day (using the UTC offset for date-boundary, falling back to UTC+0 when Autotask is not configured). Displayed on the widget as `Xh Ym` (hours + minutes, no seconds) with a `` (nf-fa-clock-o) icon. Shown always, even when zero or when there are no active issues.
+_Avoid_: Day total, daily hours
+
 **Overlay**:
 The interactive TUI layer opened by `/issues` (or `/todos` as an alias) with a unified list view and detail view. `s` toggles a Time Entry on the highlighted Plane Issue. The timed issue and selected row show a `` (nf-fa-chevron_right) cursor. `f` toggles the filter between all, plane-only, and sentry-only views.
 _Avoid_: Popup, modal
 
 **Nerd Font**:
-All TUI icons use Nerd Font (FiraCode Nerd Font) codepoints from the Private Use Area. There is no fallback to vanilla Unicode — a Nerd Font-patched monospace font is required. Icons used include `` (nf-fa-tasks for Plane items), `` (nf-fa-bug for Sentry items), `` (nf-fa-exclamation_triangle for warnings), `` (nf-fa-clock_o for timers), `` (nf-fa-download for updates), `` (nf-fa-check_circle for zero-state), `` (nf-fa-edit), `` (nf-fa-list_ol), `` (nf-fa-history), `` (nf-fa-exchange), and `` `` `` (chevron/angle navigation arrows).
+All TUI icons use Nerd Font (FiraCode Nerd Font) codepoints from the Private Use Area. There is no fallback to vanilla Unicode — a Nerd Font-patched monospace font is required. Icons used include `` (nf-fa-tasks for Plane items), `` (nf-fa-bug for Sentry items), `` (nf-fa-exclamation_triangle for warnings), `` (nf-fa-clock_o for Running Entry timer), `` (nf-fa-clock-o for Daily Total), `` (nf-fa-download for updates), `` (nf-fa-check_circle for zero-state), `` (nf-fa-edit), `` (nf-fa-list_ol), `` (nf-fa-history), `` (nf-fa-exchange), and `` `` `` (chevron/angle navigation arrows).
 _Avoid_: Unicode icons, ASCII fallback
 
 ### Sentry

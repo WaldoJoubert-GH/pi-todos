@@ -99,6 +99,27 @@ function refreshWidget(ctx: {
     !issues.issues.some(
       (i) => i.source === "plane" && i.id === running.issue_id,
     );
+
+  // Compute daily total: local Time Entries + Autotask hours
+  const utcOffset = autotaskConfigForSync?.utcOffset ?? 0;
+  const date = getTodayDateString(utcOffset);
+  const offsetMs = utcOffset * 60 * 60 * 1000;
+  const dailyLocalMs = timeEntryState
+    .filter((e) => {
+      const d = new Date(e.started_at);
+      const local = new Date(d.getTime() + offsetMs);
+      return local.toISOString().slice(0, 10) === date;
+    })
+    .reduce((sum, e) => {
+      const startMs = new Date(e.started_at).getTime();
+      const endMs = e.stopped_at
+        ? new Date(e.stopped_at).getTime()
+        : Date.now();
+      return sum + (endMs - startMs);
+    }, 0);
+  const dailyTotalMs =
+    dailyLocalMs + (autotaskTotalHours ?? 0) * 3600000;
+
   ctx.ui.setWidget(
     "todos",
     buildWidgetLines(
@@ -108,7 +129,7 @@ function refreshWidget(ctx: {
       missing,
       updateAvailableVersion,
       getPackageRepoUrlPublic(),
-      autotaskTotalHours,
+      dailyTotalMs,
     ),
   );
 }

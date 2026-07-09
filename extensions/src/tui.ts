@@ -13,6 +13,7 @@ import {
   statePill,
   priorityLabel,
   formatDuration,
+  formatDurationHm,
   formatTimestamp,
   GROUP_ORDER,
 } from "./plane.js";
@@ -133,11 +134,11 @@ export function buildWidgetLines(
   missingIssue: boolean,
   updateVersion: string | null,
   repoUrl: string | null,
-  autotaskTotalHours?: number | null,
+  dailyTotalMs: number,
 ): string[] {
   const lines: string[] = [];
 
-  // Line 1: counts line (with autotask)
+  // Line 1: counts line with daily total
   const parts: string[] = [];
   if (planeCache && planeCache.total_active > 0) {
     const planeIcon = planeCache.sync_error ? "\uF06A " : "\uF273 ";
@@ -148,8 +149,11 @@ export function buildWidgetLines(
   if (sentryCount > 0) {
     parts.push(`\uF188 ${sentryCount} sentry`);
   }
-  if (parts.length === 0) {
-    lines.push("\uF05E all clear");
+  // Daily total always visible
+  parts.push(`\uF017 ${formatDurationHm(dailyTotalMs)}`);
+  if (parts.length === 1 && planeCache === null) {
+    // Only the daily total, no issues — prefix with zero-state
+    lines.push(`\uF05E all clear  ${parts[0]}`);
   } else {
     lines.push(parts.join("  "));
   }
@@ -180,13 +184,6 @@ export function buildWidgetLines(
     if (pillParts.length > 0) {
       lines.push(pillParts.join("  "));
     }
-  }
-
-  // Autotask total hours
-  if (autotaskTotalHours != null && autotaskTotalHours > 0) {
-    parts.push(
-      `\uF251 ${autotaskTotalHours.toFixed(1)}h tracked`,
-    );
   }
 
   // Running entry line

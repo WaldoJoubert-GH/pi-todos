@@ -118,6 +118,17 @@ export function formatDuration(ms: number): string {
   return parts.join(" ");
 }
 
+export function formatDurationHm(ms: number): string {
+  if (ms < 0) ms = 0;
+  const totalSec = Math.floor(ms / 1000);
+  const h = Math.floor(totalSec / 3600);
+  const m = Math.floor((totalSec % 3600) / 60);
+  const parts: string[] = [];
+  if (h > 0) parts.push(`${h}h`);
+  parts.push(`${m}m`);
+  return parts.join(" ");
+}
+
 export function formatTimestamp(iso: string): string {
   const d = new Date(iso);
   const month = String(d.getMonth() + 1).padStart(2, "0");
