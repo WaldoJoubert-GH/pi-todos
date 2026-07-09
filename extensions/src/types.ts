@@ -14,6 +14,7 @@ export interface UnifiedIssue {
   id?: string;
   sequence_id?: number;
   description?: string;
+  state_id?: string;
   state_name?: string;
   state_group?: string;
   state_hex?: string;
@@ -102,6 +103,20 @@ export interface PlaneCache {
   states: Record<string, { count: number; color: string; group: string }>;
   total_active: number;
   sync_error?: boolean;
+}
+
+// ── Plane states cache ─────────────────────────────────────────────
+
+export interface PlaneStateItem {
+  id: string;
+  name: string;
+  color: string;
+  group: string;
+}
+
+export interface PlaneStatesCache {
+  last_fetched: string;
+  states: PlaneStateItem[];
 }
 
 // ── Sentry internal types ──────────────────────────────────────────

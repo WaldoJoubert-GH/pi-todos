@@ -1,44 +1,58 @@
 # pi-todos
 
-Plane.so todo and Sentry issue integration for [pi](https://pi.dev) — lists your active Plane issues and pulled Sentry errors right inside the terminal.
+Plane.so todo, Sentry issue, and Autotask time integration for [pi](https://pi.dev) — issues list, time tracking, and a unified TUI overlay, all inside the terminal.
 
 ## Install
 
 ```bash
-pi install git:github.com/WaldoJoubert-GH/pi-todos@v1.2.3
+pi install git:github.com/WaldoJoubert-GH/pi-todos@v1.2.7
 ```
+
+## What you get
+
+### Commands
+
+| Command | Description |
+|---|---|
+| `/issues` | Interactive TUI overlay — all active Plane issues + pulled Sentry errors. Keyboard navigation, detail preview, browser open, copy-to-clipboard. Filter by source with `f`. |
+| `/todos` | Backward-compatible alias for `/issues` |
+| `/pull-sentry <id>` | Fetch a Sentry issue by ID or URL. Saved to `.dev/sentry/<id>.json` and added to the unified list. |
+| `/times` | Time dashboard — unified chronological view of Autotask time records and local Plane time entries for the day, with day navigation and total hours. |
+
+### Widget
+
+Always-visible status bar showing Plane issue counts per state (in Plane's colors), Sentry count, Running Entry timer, and update notifications. Uses Nerd Font icons.
+
+### LLM tools
+
+- **`get_todos`** — reads the unified issue list (Plane + Sentry) so the agent can answer "what's on my list?"
+- **`fetch_sentry_issue`** — pulls Sentry issue details on demand
+
+### Time tracking
+
+- **Plane issues**: Stopwatch-based. Toggle with `s` in the overlay. Local-only — no sync to Plane. One Running Entry at a time, surviving pi restarts.
+- **Autotask**: Fetched from the Autotask REST API, cached per-date, synced every 5 minutes. Billable/non-billable with visual distinction.
 
 ## Setup
 
-Run `/issues` in pi and follow the prompts. You'll need:
+Run any command (`/issues`, `/times`) in pi and follow the interactive prompts. Each service is independently configurable — use zero, one, two, or all three.
 
-- A [Plane.so](https://plane.so) Personal Access Token (optional)
-- Your workspace slug and project ID (optional)
-- A [Sentry](https://sentry.io) Auth Token (optional)
+| Service | What you need | Secrets stored at |
+|---|---|---|
+| Plane | Personal Access Token, workspace slug, project ID | `~/.pi/agent/secrets/plane.json` |
+| Sentry | Auth Token, org slug, project slug | `~/.pi/agent/secrets/sentry.json` |
+| Autotask | API Integration Code, username, secret, resource ID | `~/.pi/agent/secrets/autotask.json` |
 
-You can configure either service independently — the extension works with zero, one, or both configured.
+Per-project config lives in `.dev/config.json`. Background sync runs every 5 minutes.
 
-The extension stores your tokens globally at `~/.pi/agent/secrets/plane.json` and `~/.pi/agent/secrets/sentry.json`, and per-project config in `.dev/config.json`.
+## Requirements
+
+- **Nerd Font** (e.g. FiraCode Nerd Font) — required for TUI icons. No Unicode fallback.
 
 ## Dev
-
-Test locally without tagging:
 
 ```bash
 pi -e ./extensions/index.ts
 ```
 
-## Requirements
-
-- **Nerd Font** (e.g. FiraCode Nerd Font) — required for TUI icons. There is no fallback to vanilla Unicode.
-
-## What you get
-
-- **`/issues`** — interactive TUI overlay listing all active Plane issues and pulled Sentry errors, with keyboard navigation, detail preview, browser open, and copy-to-clipboard. Filter by source with the `f` key.
-- **`/todos`** — backward-compatible alias for `/issues`
-- **`/pull-sentry <id>`** — fetch a Sentry issue by ID or URL, saved to `.dev/sentry/<id>.json` and added to the unified issues list
-- **Issues widget** — always-visible status bar showing Plane issue counts by state + Sentry issue count, with Nerd Font icons
-- **`get_todos` tool** — lets the LLM read your unified issue list (Plane + Sentry) when you ask about it
-- **`fetch_sentry_issue` tool** — lets the LLM pull Sentry issue details directly
-- **Background sync** — Plane cache refreshes every 5 minutes while pi is running
-- **Time tracking** — toggle time entries on Plane issues with the `s` key in the overlay
+See [`AGENTS.md`](AGENTS.md) for project structure, domain language, and architecture decisions.

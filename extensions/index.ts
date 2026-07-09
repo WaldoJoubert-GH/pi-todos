@@ -3,6 +3,7 @@ import {
   ensureDevDir,
   migrateIfNeeded,
   loadIssues,
+  saveIssues,
   resolvePlaneConfig,
   resolveSentryConfig,
   resolveAutotaskConfig,
@@ -11,7 +12,7 @@ import {
   updatePlaneConfig,
   readAutotaskCache,
 } from "./src/config.js";
-import type { UnifiedIssue, PlaneCache, TimeEntry } from "./src/types.js";
+import type { UnifiedIssue, PlaneCache, TimeEntry, PlaneStateItem } from "./src/types.js";
 import {
   ensurePlaneSetup,
   fetchProjectIdentifier,
@@ -27,6 +28,9 @@ import {
   formatPlaneForTool,
   formatDuration,
   formatTimestamp,
+  getStates,
+  patchIssueState,
+  loadStatesCache,
 } from "./src/plane.js";
 import {
   ensureSentrySetup,
@@ -129,6 +133,113 @@ function handleToggleTime(
     startWidgetTimer(ctx);
   }
   refreshWidget(ctx);
+}
+
+// ── state change handler ──────────────────────────────────────────────
+
+async function handleChangeState(
+  ctx: {
+    ui: { setWidget: (name: string, lines: string[]) => void; notify: (m: string, t?: string) => void };
+    cwd: string;
+  },
+  issue: UnifiedIssue,
+  newStateId: string,
+): Promise<void> {
+  if (issue.source !== "plane" || !issue.id) return;
+
+  const cfg = resolvePlaneConfig(ctx.cwd);
+  if (!cfg) return;
+
+  // Fetch states to resolve the new state's name/hex/group
+  const states = await getStates(ctx.cwd, cfg, cfg.token);
+  const newState = states.find((s) => s.id === newStateId);
+  if (!newState) {
+    ctx.ui.notify("Failed to resolve state.", "error");
+    return;
+  }
+
+  // Call the Plane API
+  const ok = await patchIssueState(cfg, cfg.token, issue.id, newStateId);
+  if (!ok) {
+    ctx.ui.notify("Failed to update issue state on Plane.", "error");
+    return;
+  }
+
+  // Optimistic local update: update the issue in issues.json
+  const issuesFile = loadIssues(ctx.cwd);
+  const idx = issuesFile.issues.findIndex(
+    (i) => i.source === "plane" && i.id === issue.id,
+  );
+  const EXCLUDED = new Set(["completed", "cancelled"]);
+  if (idx >= 0) {
+    if (EXCLUDED.has(newState.group)) {
+      // Remove completed/cancelled issues from the unified list
+      issuesFile.issues.splice(idx, 1);
+    } else {
+      issuesFile.issues[idx] = {
+        ...issuesFile.issues[idx],
+        state_id: newState.id,
+        state_name: newState.name,
+        state_hex: newState.color,
+        state_group: newState.group,
+      };
+    }
+    saveIssues(ctx.cwd, issuesFile);
+  }
+
+  // Update lastPlaneCache in-memory
+  if (lastPlaneCache) {
+    const ci = lastPlaneCache.issues.findIndex(
+      (i) => i.id === issue.id,
+    );
+    if (ci >= 0) {
+      const oldIssue = lastPlaneCache.issues[ci];
+      const oldGroup = oldIssue.state_group ?? "unknown";
+      const oldName = oldIssue.state_name ?? "Unknown";
+      const newGroup = newState.group;
+
+      // Update the issue in cache
+      lastPlaneCache.issues[ci] = {
+        ...oldIssue,
+        state_id: newState.id,
+        state_name: newState.name,
+        state_hex: newState.color,
+        state_group: newGroup,
+      };
+
+      // Shift state counts
+      if (lastPlaneCache.states[oldName]) {
+        lastPlaneCache.states[oldName].count = Math.max(
+          0,
+          lastPlaneCache.states[oldName].count - 1,
+        );
+      }
+      if (!lastPlaneCache.states[newState.name]) {
+        lastPlaneCache.states[newState.name] = {
+          count: 0,
+          color: newState.color,
+          group: newGroup,
+        };
+      }
+      lastPlaneCache.states[newState.name].count++;
+
+      // If moved to completed/cancelled, remove from active list
+      const EXCLUDED = new Set(["completed", "cancelled"]);
+      if (EXCLUDED.has(newGroup)) {
+        lastPlaneCache.issues.splice(ci, 1);
+        lastPlaneCache.total_active = lastPlaneCache.issues.length;
+      }
+    }
+  }
+
+  // Refresh the widget
+  refreshWidget(ctx);
+
+  // Update the overlay if it's open
+  if (overlayComponent) {
+    const updatedFile = loadIssues(ctx.cwd);
+    overlayComponent.updateIssues(updatedFile.issues);
+  }
 }
 
 // ── sync management ──────────────────────────────────────────────────
@@ -237,6 +348,8 @@ async function showOverlay(
   projectIdentifier: string | null,
   cwd: string,
   setWidget: (name: string, lines: string[]) => void,
+  states: PlaneStateItem[],
+  onChangeStateFn: (issue: UnifiedIssue, newStateId: string) => void,
 ): Promise<void> {
   const ui = ctx as unknown as {
     ui: {
@@ -274,7 +387,9 @@ async function showOverlay(
         (issueId: string) =>
           timeEntryState.filter((e) => e.issue_id === issueId),
         cwd,
+        onChangeStateFn,
       );
+      component.setStates(states);
       overlayComponent = component;
       return {
         render: (w: number) => component.render(w),
@@ -642,12 +757,19 @@ export default function (pi: ExtensionAPI) {
 
       // Show overlay with all issues
       const allIssues = loadIssues(ctx.cwd).issues;
+      const stateItems = planeCfg
+        ? await getStates(ctx.cwd, planeCfg, planeCfg.token)
+        : loadStatesCache(ctx.cwd);
       await showOverlay(
         ctx as never,
         allIssues,
         projectIdentifier,
         ctx.cwd,
         (name, lines) => ctx.ui.setWidget(name, lines),
+        stateItems,
+        (issue, newStateId) => {
+          handleChangeState(ctx, issue, newStateId);
+        },
       );
     },
   });
@@ -727,12 +849,21 @@ export default function (pi: ExtensionAPI) {
       }
 
       const allIssues = loadIssues(ctx.cwd).issues;
+      const stateItems = await getStates(
+        ctx.cwd,
+        setup.config,
+        setup.token,
+      );
       await showOverlay(
         ctx as never,
         allIssues,
         setup.config.project_identifier ?? null,
         ctx.cwd,
         (name, lines) => ctx.ui.setWidget(name, lines),
+        stateItems,
+        (issue, newStateId) => {
+          handleChangeState(ctx, issue, newStateId);
+        },
       );
     },
   });

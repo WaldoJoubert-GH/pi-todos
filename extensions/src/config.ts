@@ -10,6 +10,7 @@ import type {
   ResolvedSentryConfig,
   AutotaskCache,
   ResolvedAutotaskConfig,
+  PlaneStatesCache,
 } from "./types.js";
 
 // ── secrets ─────────────────────────────────────────────────────────
@@ -307,6 +308,26 @@ export function saveTimeEntries(cwd: string, entries: TimeEntry[]): void {
     JSON.stringify({ entries }, null, 2),
     "utf-8",
   );
+}
+
+// ── plane states cache ─────────────────────────────────────────────
+
+export function planeStatesPath(cwd: string): string {
+  return path.join(devDir(cwd), "plane-states.json");
+}
+
+export function loadPlaneStates(cwd: string): PlaneStatesCache | null {
+  try {
+    const raw = fs.readFileSync(planeStatesPath(cwd), "utf-8");
+    return JSON.parse(raw) as PlaneStatesCache;
+  } catch {
+    return null;
+  }
+}
+
+export function savePlaneStates(cwd: string, cache: PlaneStatesCache): void {
+  ensureDevDir(cwd);
+  fs.writeFileSync(planeStatesPath(cwd), JSON.stringify(cache, null, 2), "utf-8");
 }
 
 // ── migration from old .todo/ and .sentry/ ──────────────────────────

@@ -5,6 +5,7 @@ import type {
   TimeEntry,
   AutotaskTimeRecord,
   AutotaskCache,
+  PlaneStateItem,
 } from "./types.js";
 import type { DashboardRow } from "./autotask.js";
 import {
@@ -246,6 +247,13 @@ export class UnifiedOverlay {
   > | null;
   private cwd: string;
 
+  // Dropdown state
+  private onChangeState: ((issue: UnifiedIssue, newStateId: string) => void) | null = null;
+  private dropdownStates: PlaneStateItem[] = [];
+  private dropdownOpen = false;
+  private dropdownIndex = 0;
+  private dropdownIssue: UnifiedIssue | null = null;
+
   constructor(
     issues: UnifiedIssue[],
     theme: {
@@ -259,6 +267,7 @@ export class UnifiedOverlay {
     getAccumulatedMsFn: (issueId: string) => number,
     getTimeEntriesForIssue: (issueId: string) => TimeEntry[],
     cwd: string,
+    onChangeState?: (issue: UnifiedIssue, newStateId: string) => void,
   ) {
     this.allIssues = issues;
     this.theme = theme;
@@ -278,7 +287,46 @@ export class UnifiedOverlay {
         return null;
       }
     };
+    this.onChangeState = onChangeState ?? null;
     this.applyFilter();
+  }
+
+  /** Update the States list available for the dropdown. */
+  setStates(states: PlaneStateItem[]): void {
+    this.dropdownStates = [...states];
+  }
+
+  private openDropdown(): void {
+    const issue = this.detailIssue ?? this.filteredIssues[this.selected];
+    if (!issue || issue.source !== "plane") return;
+    if (this.dropdownStates.length === 0) return;
+
+    // Sort states by group order (backlog → completed → cancelled)
+    const groupOrder = [
+      "backlog",
+      "unstarted",
+      "started",
+      "triage",
+      "completed",
+      "cancelled",
+    ];
+    const sorted = [...this.dropdownStates].sort((a, b) => {
+      const gA = groupOrder.indexOf(a.group);
+      const gB = groupOrder.indexOf(b.group);
+      if (gA !== gB) return (gA === -1 ? 999 : gA) - (gB === -1 ? 999 : gB);
+      return a.name.localeCompare(b.name);
+    });
+    this.dropdownStates = sorted;
+
+    // Pre-select current state
+    const currentId = issue.state_id;
+    const currentIdx = this.dropdownStates.findIndex(
+      (s) => s.id === currentId,
+    );
+    this.dropdownIndex = currentIdx >= 0 ? currentIdx : 0;
+    this.dropdownIssue = issue;
+    this.dropdownOpen = true;
+    this.invalidate();
   }
 
   updateIssues(issues: UnifiedIssue[]): void {
@@ -303,6 +351,50 @@ export class UnifiedOverlay {
   }
 
   handleInput(data: string): void {
+    // Dropdown mode — only dropdown keys respond
+    if (this.dropdownOpen) {
+      if (matchesKey(data, Key.escape)) {
+        this.dropdownOpen = false;
+        this.dropdownIssue = null;
+        this.invalidate();
+        return;
+      }
+      if (matchesKey(data, Key.enter)) {
+        const state = this.dropdownStates[this.dropdownIndex];
+        if (state && this.dropdownIssue && this.onChangeState) {
+          this.onChangeState(this.dropdownIssue, state.id);
+        }
+        this.dropdownOpen = false;
+        this.dropdownIssue = null;
+        this.invalidate();
+        return;
+      }
+      if (matchesKey(data, Key.up)) {
+        if (this.dropdownIndex > 0) {
+          this.dropdownIndex--;
+          this.invalidate();
+        }
+        return;
+      }
+      if (matchesKey(data, Key.down)) {
+        if (this.dropdownIndex < this.dropdownStates.length - 1) {
+          this.dropdownIndex++;
+          this.invalidate();
+        }
+        return;
+      }
+      return;
+    }
+
+    // d → open state change dropdown (Plane issues only)
+    if (matchesKey(data, "d")) {
+      const issue = this.detailIssue ?? this.filteredIssues[this.selected];
+      if (issue && issue.source === "plane") {
+        this.openDropdown();
+      }
+      return;
+    }
+
     // Ctrl+Enter → open URL
     if (matchesKey(data, Key.ctrl("enter"))) {
       const issue = this.detailIssue ?? this.filteredIssues[this.selected];
@@ -419,6 +511,13 @@ export class UnifiedOverlay {
   render(width: number): string[] {
     if (this.cachedLines && this.cachedWidth === width) {
       return this.cachedLines;
+    }
+
+    if (this.dropdownOpen) {
+      const dropdownLines = this.renderDropdown(width);
+      this.cachedWidth = width;
+      this.cachedLines = dropdownLines;
+      return dropdownLines;
     }
 
     if (this.detailIssue) {
@@ -622,7 +721,7 @@ export class UnifiedOverlay {
 
     // ── footer ───────────────────────────────────────────────────
     const footer = padOrTrunc(
-      "\uF102 \uF103 scroll  Enter preview  s start/stop (Plane)  f filter  Ctrl+Enter open  c copy  Esc close",
+      "\uF102 \uF103 scroll  Enter preview  s start/stop (Plane)  d change state (Plane)  f filter  Ctrl+Enter open  c copy  Esc close",
       innerW,
     );
     lines.push(B("\u2502") + t.fg("dim", footer) + B("\u2502"));
@@ -634,6 +733,69 @@ export class UnifiedOverlay {
 
     this.cachedWidth = width;
     this.cachedLines = lines;
+    return lines;
+  }
+
+  // ── dropdown modal ─────────────────────────────────────────────────
+
+  private renderDropdown(width: number): string[] {
+    const t = this.theme;
+    const B = (s: string) => t.fg("border", s);
+    const innerW = Math.max(1, width - 2);
+    const lines: string[] = [];
+
+    // ── top border ───────────────────────────────────────────────
+    const title = `Change State `;
+    const topDash = Math.max(0, innerW - title.length - 3);
+    lines.push(
+      B("\u250C\u2500 ") +
+        t.fg("accent", title) +
+        B(" " + "\u2500".repeat(topDash) + "\u2510"),
+    );
+
+    // ── hint row ─────────────────────────────────────────────────
+    const hint = "\uF102\uF103 navigate  Enter select  Esc cancel";
+    const hintPad = Math.max(0, innerW - visibleWidth(hint));
+    lines.push(
+      B("\u2502") + t.fg("dim", hint) + " ".repeat(hintPad) + B("\u2502"),
+    );
+
+    // ── separator ────────────────────────────────────────────────
+    lines.push(
+      B("\u251C" + "\u2500".repeat(innerW) + "\u2524"),
+    );
+
+    // ── state rows ───────────────────────────────────────────────
+    const currentId = this.dropdownIssue?.state_id;
+    for (let i = 0; i < this.dropdownStates.length; i++) {
+      const state = this.dropdownStates[i];
+      const isSelected = i === this.dropdownIndex;
+      const isCurrent = state.id === currentId;
+
+      const pill = statePill(state.color, ` ${state.name} `);
+      const indicator = isCurrent ? " \u2713" : "  ";
+      const row = `${isSelected ? "\uF054 " : "  "}${pill}${indicator}`;
+      const rowVis = visibleWidth(row);
+
+      if (isSelected) {
+        const content = t.bg("selectedBg", t.fg("text", row));
+        const padLen = Math.max(0, innerW - rowVis);
+        lines.push(
+          B("\u2502") + content + " ".repeat(padLen) + B("\u2502"),
+        );
+      } else {
+        const padLen = Math.max(0, innerW - rowVis);
+        lines.push(
+          B("\u2502") + row + " ".repeat(padLen) + B("\u2502"),
+        );
+      }
+    }
+
+    // ── bottom border ────────────────────────────────────────────
+    lines.push(
+      B("\u2514" + "\u2500".repeat(innerW) + "\u2518"),
+    );
+
     return lines;
   }
 
@@ -971,7 +1133,7 @@ export class UnifiedOverlay {
 
     // ── footer ───────────────────────────────────────────────────
     const footer = padOrTrunc(
-      "Esc back  \uF102 \uF103 scroll  Ctrl+Enter open  c copy",
+      "Esc back  \uF102 \uF103 scroll  d change state (Plane)  Ctrl+Enter open  c copy",
       innerW,
     );
     lines.push(B("\u2502") + t.fg("dim", footer) + B("\u2502"));

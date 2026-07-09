@@ -9,6 +9,7 @@ import type {
   PlaneCache,
   PlaneConfig,
   TimeEntry,
+  PlaneStateItem,
 } from "./types.js";
 import {
   loadPlaneToken,
@@ -20,6 +21,8 @@ import {
   saveTimeEntries,
   loadDevConfig,
   updatePlaneConfig,
+  loadPlaneStates,
+  savePlaneStates,
 } from "./config.js";
 
 // ── constants ────────────────────────────────────────────────────────
@@ -219,10 +222,19 @@ type ApiOk<T> = { ok: true; status: number; data: T };
 type ApiErr = { ok: false; status: number; body: string };
 type ApiResult<T> = ApiOk<T> | ApiErr;
 
-async function apiFetch<T>(url: string, token: string): Promise<ApiResult<T>> {
+async function apiFetch<T>(
+  url: string,
+  token: string,
+  method: string = "GET",
+  body?: unknown,
+): Promise<ApiResult<T>> {
   let response: Response;
   try {
-    response = await fetch(url, { headers: { "X-Api-Key": token } });
+    const headers: Record<string, string> = { "X-Api-Key": token };
+    if (body) headers["Content-Type"] = "application/json";
+    const options: RequestInit = { method, headers };
+    if (body) options.body = JSON.stringify(body);
+    response = await fetch(url, options);
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : String(err);
     return { ok: false, status: 0, body: `Network error: ${msg}` };
@@ -364,7 +376,7 @@ function stripHtml(html: string): string {
 export async function buildPlaneCache(
   config: PlaneConfig,
   token: string,
-): Promise<{ cache: PlaneCache | null; error: string | null }> {
+): Promise<{ cache: PlaneCache | null; error: string | null; stateItems: PlaneStateItem[] }> {
   const issuesUrl = `${PLANE_API_BASE}/workspaces/${config.workspace_slug}/projects/${config.project_id}/issues/?per_page=1000`;
   const [issuesResult, stateMap] = await Promise.all([
     apiFetch<{ results?: RawPlaneIssue[] }>(issuesUrl, token),
@@ -375,6 +387,7 @@ export async function buildPlaneCache(
     return {
       cache: null,
       error: `Plane API error: ${issuesResult.status} ${issuesResult.body}`,
+      stateItems: [],
     };
   }
 
@@ -415,6 +428,7 @@ export async function buildPlaneCache(
       sequence_id: issue.sequence_id,
       title: issue.name,
       description,
+      state_id: issue.state,
       state_name: stateName,
       state_group: group,
       state_hex: stateHex,
@@ -451,7 +465,90 @@ export async function buildPlaneCache(
     total_active: issues.length,
   };
 
-  return { cache, error: null };
+  // Build state items from the fetched state map
+  const stateItems: PlaneStateItem[] = [];
+  for (const [id, s] of stateMap) {
+    stateItems.push({ id, name: s.name, color: s.color, group: s.group });
+  }
+
+  return { cache, error: null, stateItems };
+}
+
+// ── states cache ────────────────────────────────────────────────────
+
+export function loadStatesCache(cwd: string): PlaneStateItem[] {
+  const cached = loadPlaneStates(cwd);
+  return cached?.states ?? [];
+}
+
+export function saveStatesCache(
+  cwd: string,
+  states: PlaneStateItem[],
+): void {
+  savePlaneStates(cwd, {
+    last_fetched: new Date().toISOString(),
+    states,
+  });
+}
+
+function buildStateItems(stateMap: Map<string, RawPlaneState>): PlaneStateItem[] {
+  const items: PlaneStateItem[] = [];
+  for (const [id, s] of stateMap) {
+    items.push({
+      id,
+      name: s.name,
+      color: s.color || "#808080",
+      group: s.group,
+    });
+  }
+  return items;
+}
+
+/** Fetch states from the Plane API, bypassing cache. */
+async function fetchStates(
+  config: PlaneConfig,
+  token: string,
+): Promise<Map<string, RawPlaneState>> {
+  const url = `${PLANE_API_BASE}/workspaces/${config.workspace_slug}/projects/${config.project_id}/states/`;
+  const result = await apiFetch<{ results?: RawPlaneState[] }>(url, token);
+  if (!result.ok) return new Map();
+
+  const map = new Map<string, RawPlaneState>();
+  for (const s of result.data.results ?? []) {
+    map.set(s.id, s);
+  }
+  return map;
+}
+
+/**
+ * Get the workspace States list. Reads from cache if available,
+ * force-fetches from the API if the cache is cold.
+ */
+export async function getStates(
+  cwd: string,
+  config: PlaneConfig,
+  token: string,
+): Promise<PlaneStateItem[]> {
+  const cached = loadPlaneStates(cwd);
+  if (cached && cached.states.length > 0) return cached.states;
+
+  const map = await fetchStates(config, token);
+  const items = buildStateItems(map);
+  saveStatesCache(cwd, items);
+  return items;
+}
+
+// ── patch issue state ───────────────────────────────────────────────
+
+export async function patchIssueState(
+  config: PlaneConfig,
+  token: string,
+  issueId: string,
+  stateId: string,
+): Promise<boolean> {
+  const url = `${PLANE_API_BASE}/workspaces/${config.workspace_slug}/projects/${config.project_id}/issues/${issueId}/`;
+  const result = await apiFetch<unknown>(url, token, "PATCH", { state: stateId });
+  return result.ok;
 }
 
 // ── sync (fetch + persist) ───────────────────────────────────────────
@@ -461,7 +558,7 @@ export async function syncPlane(
   config: PlaneConfig,
   token: string,
 ): Promise<PlaneCache | null> {
-  const { cache, error } = await buildPlaneCache(config, token);
+  const { cache, error, stateItems } = await buildPlaneCache(config, token);
 
   if (error || !cache) {
     // Mark sync error on existing issues file
@@ -474,6 +571,7 @@ export async function syncPlane(
 
   cache.sync_error = false;
   replacePlaneIssues(cwd, cache.issues, cache.last_synced);
+  saveStatesCache(cwd, stateItems);
   return cache;
 }
 

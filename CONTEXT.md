@@ -30,6 +30,18 @@ _Avoid_: State color (ambiguous with theme tokens)
 The visual rendering of a State as a background-filled, padded label. The fill color is the State Hex; the text color is auto-selected (black or white) based on the hex's relative luminance. Each side of the label has a single-space padding. Used on the widget, overlay list, and overlay detail view.
 _Avoid_: State badge, state chip, state tag
 
+**State ID**:
+The Plane-internal UUID for a State (e.g., `b2f3a1c4-...`). Needed when calling the Plane API to mutate an Issue's State. Stored on the UnifiedIssue as `state_id` and in the State Cache File alongside the display name, hex, and group.
+_Avoid_: State key, state uuid (one word, canonical form is "State ID")
+
+**State Cache File**:
+A local JSON file at `.dev/plane-states.json` holding the full list of States for the configured Plane workspace: each with its State ID, name, hex color, and group. Written on every Plane sync (5-minute background + on-demand). Read by the overlay to populate the State dropdown.
+_Avoid_: States file, state list cache
+
+**State Dropdown**:
+The popup modal in the overlay triggered by `d` that lists all workspace States as State Pills for selection. Arrow keys navigate, Enter confirms a State change, Escape cancels.
+_Avoid_: Status picker, state selector
+
 **Active**:
 An Issue whose State belongs to any group other than `completed` or `cancelled`. Backlog, unstarted, started, and triage issues are considered active.
 _Avoid_: Open, pending, in-flight
