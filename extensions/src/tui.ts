@@ -18,6 +18,7 @@ import {
   GROUP_ORDER,
 } from "./plane.js";
 import {
+  decodeKittyPrintable,
   matchesKey,
   Key,
   truncateToWidth,
@@ -135,6 +136,7 @@ export function buildWidgetLines(
   updateVersion: string | null,
   repoUrl: string | null,
   dailyTotalMs: number,
+  projectIdentifier: string | null = null,
 ): string[] {
   const lines: string[] = [];
 
@@ -183,6 +185,36 @@ export function buildWidgetLines(
     }
     if (pillParts.length > 0) {
       lines.push(pillParts.join("  "));
+    }
+  }
+
+  // In-progress issue titles (started group)
+  if (planeCache && planeCache.issues) {
+    const startedIssues = planeCache.issues.filter(
+      (i) => i.state_group === "started",
+    );
+    const MAX_INPROGRESS_SHOWN = 5;
+    const shown = startedIssues.slice(0, MAX_INPROGRESS_SHOWN);
+    for (const iss of shown) {
+      const slug =
+        projectIdentifier && iss.sequence_id != null
+          ? `${projectIdentifier}-${iss.sequence_id}`
+          : iss.sequence_id != null
+            ? `#${iss.sequence_id}`
+            : "#?";
+      const color = iss.state_hex ?? "#808080";
+      const coloredSlug = hexToAnsi(color, slug);
+      const title =
+        iss.title.length > 75
+          ? iss.title.slice(0, 74) + "\u2026"
+          : iss.title;
+      lines.push(
+        `\uF0A9 ${coloredSlug} ${title}`,
+      );
+    }
+    const remaining = startedIssues.length - MAX_INPROGRESS_SHOWN;
+    if (remaining > 0) {
+      lines.push(`  \u2026 and ${remaining} more`);
     }
   }
 
@@ -251,6 +283,14 @@ export class UnifiedOverlay {
   private dropdownIndex = 0;
   private dropdownIssue: UnifiedIssue | null = null;
 
+  // Create-issue input mode
+  private inputMode = false;
+  private inputBuffer = "";
+  private onCreate: ((title: string) => Promise<boolean>) | null = null;
+
+  /** Set by the TUI factory to trigger re-renders from async callbacks. */
+  requestRender: (() => void) | null = null;
+
   constructor(
     issues: UnifiedIssue[],
     theme: {
@@ -265,6 +305,7 @@ export class UnifiedOverlay {
     getTimeEntriesForIssue: (issueId: string) => TimeEntry[],
     cwd: string,
     onChangeState?: (issue: UnifiedIssue, newStateId: string) => void,
+    onCreate?: (title: string) => Promise<boolean>,
   ) {
     this.allIssues = issues;
     this.theme = theme;
@@ -285,6 +326,7 @@ export class UnifiedOverlay {
       }
     };
     this.onChangeState = onChangeState ?? null;
+    this.onCreate = onCreate ?? null;
     this.applyFilter();
   }
 
@@ -347,6 +389,14 @@ export class UnifiedOverlay {
     this.invalidate();
   }
 
+  /** Set the current filter and re-apply. Used externally after issue creation. */
+  setFilter(filter: IssueFilter): void {
+    if (this.filter !== filter) {
+      this.filter = filter;
+      this.applyFilter();
+    }
+  }
+
   handleInput(data: string): void {
     // Dropdown mode — only dropdown keys respond
     if (this.dropdownOpen) {
@@ -380,6 +430,80 @@ export class UnifiedOverlay {
         }
         return;
       }
+      return;
+    }
+
+    // Input mode — capture input for new issue creation
+    if (this.inputMode) {
+      // Escape → cancel
+      if (matchesKey(data, Key.escape)) {
+        this.inputMode = false;
+        this.inputBuffer = "";
+        this.invalidate();
+        return;
+      }
+
+      // Enter → submit (only if buffer non-empty)
+      if (matchesKey(data, Key.enter)) {
+        if (this.inputBuffer.length === 0) {
+          // Empty title — same as cancel
+          this.inputMode = false;
+          this.inputBuffer = "";
+          this.invalidate();
+          return;
+        }
+        // Call onCreate callback (fire-and-forget)
+        const title = this.inputBuffer;
+        this.inputMode = false;
+        this.inputBuffer = "";
+        this.invalidate();
+        if (this.onCreate) {
+          this.onCreate(title)
+            .then(() => {
+              this.requestRender?.();
+            })
+            .catch(() => {});
+        }
+        return;
+      }
+
+      // Backspace
+      if (matchesKey(data, Key.backspace)) {
+        if (this.inputBuffer.length > 0) {
+          this.inputBuffer = this.inputBuffer.slice(0, -1);
+          this.invalidate();
+        }
+        return;
+      }
+
+      // Printable characters
+      const kittyChar = decodeKittyPrintable(data);
+      if (kittyChar !== undefined) {
+        this.inputBuffer += kittyChar;
+        this.invalidate();
+        return;
+      }
+
+      // Legacy terminal fallback: single printable ASCII character
+      if (data.length === 1) {
+        const code = data.charCodeAt(0);
+        if (code >= 32 && code <= 126) {
+          this.inputBuffer += data;
+          this.invalidate();
+          return;
+        }
+      }
+
+      return;
+    }
+
+    // n → enter create-issue input mode
+    if (matchesKey(data, "n")) {
+      this.inputMode = true;
+      this.inputBuffer = "";
+      this.detailIssue = null;
+      this.detailScroll = 0;
+      this.invalidate();
       return;
     }
 
@@ -515,6 +639,13 @@ export class UnifiedOverlay {
       this.cachedWidth = width;
       this.cachedLines = dropdownLines;
       return dropdownLines;
+    }
+
+    if (this.inputMode) {
+      const inputLines = this.renderInputMode(width);
+      this.cachedWidth = width;
+      this.cachedLines = inputLines;
+      return inputLines;
     }
 
     if (this.detailIssue) {
@@ -717,11 +848,13 @@ export class UnifiedOverlay {
     );
 
     // ── footer ───────────────────────────────────────────────────
-    const footer = padOrTrunc(
-      "\uF102 \uF103 scroll  Enter preview  s start/stop (Plane)  d change state (Plane)  f filter  Ctrl+Enter open  c copy  Esc close",
+    const footerLines = wrapText(
+      "\uF102 \uF103 scroll  n new issue  Enter preview  s start/stop (Plane)  d change state (Plane)  f filter  Ctrl+Enter open  c copy  Esc close",
       innerW,
     );
-    lines.push(B("\u2502") + t.fg("dim", footer) + B("\u2502"));
+    for (const fl of footerLines) {
+      lines.push(B("\u2502") + t.fg("dim", fl.padEnd(innerW)) + B("\u2502"));
+    }
 
     // ── bottom border ────────────────────────────────────────────
     lines.push(
@@ -786,6 +919,75 @@ export class UnifiedOverlay {
           B("\u2502") + row + " ".repeat(padLen) + B("\u2502"),
         );
       }
+    }
+
+    // ── bottom border ────────────────────────────────────────────
+    lines.push(
+      B("\u2514" + "\u2500".repeat(innerW) + "\u2518"),
+    );
+
+    return lines;
+  }
+
+  // ── create-issue input mode ─────────────────────────────────────────
+
+  private renderInputMode(width: number): string[] {
+    const t = this.theme;
+    const B = (s: string) => t.fg("border", s);
+    const innerW = Math.max(1, width - 2);
+    const lines: string[] = [];
+
+    // ── top border ───────────────────────────────────────────────
+    const title = "New Issue ";
+    const topDash = Math.max(0, innerW - title.length - 3);
+    lines.push(
+      B("\u250C\u2500 ") +
+        t.fg("accent", title) +
+        B(" " + "\u2500".repeat(topDash) + "\u2510"),
+    );
+
+    // ── hint row ─────────────────────────────────────────────────
+    const hint = "Enter a title for the new issue…";
+    const hintPad = Math.max(0, innerW - hint.length);
+    lines.push(
+      B("\u2502") + t.fg("dim", hint) + " ".repeat(hintPad) + B("\u2502"),
+    );
+
+    // ── separator ────────────────────────────────────────────────
+    lines.push(
+      B("\u251C" + "\u2500".repeat(innerW) + "\u2524"),
+    );
+
+    // ── input field ──────────────────────────────────────────────
+    const cursor = this.inputBuffer.length > 0 ? "" : " ";
+    const displayText = `\uF040 ${this.inputBuffer}${cursor}`;
+    const inputLine = padOrTrunc(displayText, innerW);
+    const inputContent = t.bg("selectedBg", t.fg("text", inputLine));
+    lines.push(
+      B("\u2502") + inputContent + B("\u2502"),
+    );
+
+    // ── empty input warning for clarity (only shown when buffer is empty) ─
+    if (this.inputBuffer.length === 0) {
+      const emptyMsg = padOrTrunc(
+        "(type a title — Enter creates, Esc cancels)",
+        innerW,
+      );
+      lines.push(
+        B("\u2502") + t.fg("muted", emptyMsg) + B("\u2502"),
+      );
+    }
+
+    // ── footer ───────────────────────────────────────────────────
+    lines.push(
+      B("\u251C" + "\u2500".repeat(innerW) + "\u2524"),
+    );
+    const footerLines = wrapText(
+      "Enter create  Esc cancel",
+      innerW,
+    );
+    for (const fl of footerLines) {
+      lines.push(B("\u2502") + t.fg("dim", fl.padEnd(innerW)) + B("\u2502"));
     }
 
     // ── bottom border ────────────────────────────────────────────
@@ -1129,11 +1331,13 @@ export class UnifiedOverlay {
     );
 
     // ── footer ───────────────────────────────────────────────────
-    const footer = padOrTrunc(
-      "Esc back  \uF102 \uF103 scroll  d change state (Plane)  Ctrl+Enter open  c copy",
+    const footerLines = wrapText(
+      "Esc back  n new issue  \uF102 \uF103 scroll  d change state (Plane)  Ctrl+Enter open  c copy",
       innerW,
     );
-    lines.push(B("\u2502") + t.fg("dim", footer) + B("\u2502"));
+    for (const fl of footerLines) {
+      lines.push(B("\u2502") + t.fg("dim", fl.padEnd(innerW)) + B("\u2502"));
+    }
 
     // ── bottom border ────────────────────────────────────────────
     lines.push(

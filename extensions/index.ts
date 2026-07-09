@@ -31,6 +31,8 @@ import {
   getStates,
   patchIssueState,
   loadStatesCache,
+  resolveDefaultStateId,
+  createIssue,
 } from "./src/plane.js";
 import {
   ensureSentrySetup,
@@ -120,6 +122,9 @@ function refreshWidget(ctx: {
   const dailyTotalMs =
     dailyLocalMs + (autotaskTotalHours ?? 0) * 3600000;
 
+  const planeCfg = resolvePlaneConfig(ctx.cwd);
+  const widgetProjectIdentifier = planeCfg?.project_identifier ?? null;
+
   ctx.ui.setWidget(
     "todos",
     buildWidgetLines(
@@ -130,6 +135,7 @@ function refreshWidget(ctx: {
       updateAvailableVersion,
       getPackageRepoUrlPublic(),
       dailyTotalMs,
+      widgetProjectIdentifier,
     ),
   );
 }
@@ -263,6 +269,102 @@ async function handleChangeState(
   }
 }
 
+// ── create issue handler ────────────────────────────────────────────
+
+async function handleCreateIssue(
+  ctx: {
+    ui: { setWidget: (name: string, lines: string[]) => void; notify: (m: string, t?: string) => void };
+    cwd: string;
+  },
+  title: string,
+): Promise<boolean> {
+  if (!title || title.trim().length === 0) return false;
+
+  const planeCfg = resolvePlaneConfig(ctx.cwd);
+  if (!planeCfg) {
+    ctx.ui.notify("Plane is not configured — cannot create issue.", "error");
+    return false;
+  }
+
+  // Load states and resolve default state
+  const states = await getStates(ctx.cwd, planeCfg, planeCfg.token);
+  const defaultStateId = resolveDefaultStateId(states);
+  if (!defaultStateId) {
+    ctx.ui.notify("No suitable default State found (looked for Todo/unstarted/backlog).", "error");
+    return false;
+  }
+
+  // Get today's date (ISO 8601) using UTC — Plane expects UTC dates
+  const today = new Date().toISOString().slice(0, 10);
+
+  // Call the Plane API
+  const result = await createIssue(
+    planeCfg,
+    planeCfg.token,
+    title,
+    defaultStateId,
+    today,
+  );
+
+  if (!result.ok || !result.issue) {
+    ctx.ui.notify(
+      `Failed to create issue: ${result.error ?? "Unknown error"}`,
+      "error",
+    );
+    return false;
+  }
+
+  // Resolve the default state's name/hex/group for the optimistic add
+  const defaultState = states.find((s) => s.id === defaultStateId);
+  const stateName = defaultState?.name ?? "Todo";
+  const stateHex = defaultState?.color ?? "#808080";
+  const stateGroup = defaultState?.group ?? "unstarted";
+
+  // Build the full unified issue with resolved state info
+  const newIssue: UnifiedIssue = {
+    ...result.issue,
+    state_name: stateName,
+    state_hex: stateHex,
+    state_group: stateGroup,
+  };
+
+  // Optimistic local add to issues.json
+  const issuesFile = loadIssues(ctx.cwd);
+  issuesFile.issues.unshift(newIssue);
+  saveIssues(ctx.cwd, issuesFile);
+
+  // Optimistic update to lastPlaneCache
+  if (lastPlaneCache) {
+    lastPlaneCache.issues.unshift(newIssue);
+    lastPlaneCache.total_active = lastPlaneCache.issues.length;
+    if (!lastPlaneCache.states[stateName]) {
+      lastPlaneCache.states[stateName] = {
+        count: 0,
+        color: stateHex,
+        group: stateGroup,
+      };
+    }
+    lastPlaneCache.states[stateName].count++;
+  }
+
+  // Refresh the widget
+  refreshWidget(ctx);
+
+  // Update the overlay if it's open
+  if (overlayComponent) {
+    const updatedFile = loadIssues(ctx.cwd);
+    overlayComponent.updateIssues(updatedFile.issues);
+  }
+
+  // Auto-switch overlay filter from sentry to all so the new issue is visible
+  if (overlayComponent) {
+    overlayComponent.setFilter("all");
+  }
+
+  ctx.ui.notify(`Created issue #${newIssue.sequence_id ?? "?"}`, "info");
+  return true;
+}
+
 // ── sync management ──────────────────────────────────────────────────
 
 let syncing = false;
@@ -371,6 +473,7 @@ async function showOverlay(
   setWidget: (name: string, lines: string[]) => void,
   states: PlaneStateItem[],
   onChangeStateFn: (issue: UnifiedIssue, newStateId: string) => void,
+  onCreateFn?: (title: string) => Promise<boolean>,
 ): Promise<void> {
   const ui = ctx as unknown as {
     ui: {
@@ -409,8 +512,10 @@ async function showOverlay(
           timeEntryState.filter((e) => e.issue_id === issueId),
         cwd,
         onChangeStateFn,
+        onCreateFn,
       );
       component.setStates(states);
+      component.requestRender = () => tui.requestRender();
       overlayComponent = component;
       return {
         render: (w: number) => component.render(w),
@@ -791,6 +896,8 @@ export default function (pi: ExtensionAPI) {
         (issue, newStateId) => {
           handleChangeState(ctx, issue, newStateId);
         },
+        (title: string) =>
+          handleCreateIssue(ctx, title),
       );
     },
   });
@@ -885,6 +992,8 @@ export default function (pi: ExtensionAPI) {
         (issue, newStateId) => {
           handleChangeState(ctx, issue, newStateId);
         },
+        (title: string) =>
+          handleCreateIssue(ctx, title),
       );
     },
   });

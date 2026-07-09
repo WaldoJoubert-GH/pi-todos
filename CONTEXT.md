@@ -90,6 +90,18 @@ _Avoid_: Popup, modal
 All TUI icons use Nerd Font (FiraCode Nerd Font) codepoints from the Private Use Area. There is no fallback to vanilla Unicode — a Nerd Font-patched monospace font is required. Icons used include `` (nf-fa-tasks for Plane items), `` (nf-fa-bug for Sentry items), `` (nf-fa-exclamation_triangle for warnings), `` (nf-fa-clock_o for Running Entry timer), `` (nf-fa-clock-o for Daily Total), `` (nf-fa-download for updates), `` (nf-fa-check_circle for zero-state), `` (nf-fa-edit), `` (nf-fa-list_ol), `` (nf-fa-history), `` (nf-fa-exchange), and `` `` `` (chevron/angle navigation arrows).
 _Avoid_: Unicode icons, ASCII fallback
 
+**Create**:
+The action of adding a new Plane Issue directly from the `/issues` overlay by pressing `n`, typing a title, and pressing Enter. Issues are created via the Plane REST API. The verb used for the user action, not the system operation.
+_Avoid_: Add, make, post, submit
+
+**New Issue**:
+The noun phrase for the object being created in the inline input mode. Displayed as the title of the input modal ("New Issue") and used in UI labels. Refers to the state before the Issue exists — once created it becomes a regular Plane Issue.
+_Avoid_: New todo, new ticket, new item
+
+**Create-issue Input Mode**:
+The inline text input state entered by pressing `n` in the overlay (from either list or detail view). Printable characters populate the input buffer, Backspace deletes, Enter submits (non-empty buffer), and Escape cancels. Empty titles are treated the same as Escape.
+_Avoid_: Input mode, title input, new issue prompt
+
 ### Sentry
 
 **Sentry Issue**:

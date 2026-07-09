@@ -549,6 +549,107 @@ export async function getStates(
   return items;
 }
 
+// ── resolve default state ID ────────────────────────────────────────
+
+/**
+ * Resolve the default State ID for new issues.
+ * 1. Find a State named "Todo" (case-insensitive).
+ * 2. Fallback: first State in the `unstarted` group.
+ * 3. Fallback: first State in the `backlog` group.
+ * 4. Return null if nothing matches.
+ */
+export function resolveDefaultStateId(
+  states: PlaneStateItem[],
+): string | null {
+  // 1. Find by name "todo" (case-insensitive)
+  const todo = states.find(
+    (s) => s.name.toLowerCase() === "todo",
+  );
+  if (todo) return todo.id;
+
+  // 2. Fallback: first unstarted group state
+  const unstarted = states.find(
+    (s) => s.group === "unstarted",
+  );
+  if (unstarted) return unstarted.id;
+
+  // 3. Fallback: first backlog group state
+  const backlog = states.find((s) => s.group === "backlog");
+  if (backlog) return backlog.id;
+
+  return null;
+}
+
+// ── create issue ──────────────────────────────────────────────────────
+
+export interface CreateIssueResult {
+  ok: boolean;
+  issue?: UnifiedIssue;
+  error?: string;
+}
+
+/**
+ * Create a new Plane issue with the given title, state, and start date.
+ * Returns the created issue as a UnifiedIssue on success.
+ */
+export async function createIssue(
+  config: PlaneConfig,
+  token: string,
+  title: string,
+  stateId: string,
+  startDate: string,
+): Promise<CreateIssueResult> {
+  const url = `${PLANE_API_BASE}/workspaces/${config.workspace_slug}/projects/${config.project_id}/issues/`;
+  const body = {
+    name: title,
+    project: config.project_id,
+    state: stateId,
+    start_date: startDate,
+  };
+
+  const result = await apiFetch<Record<string, unknown>>(
+    url,
+    token,
+    "POST",
+    body,
+  );
+
+  if (!result.ok) {
+    return {
+      ok: false,
+      error: `Plane API error: ${result.status} ${result.body}`,
+    };
+  }
+
+  const data = result.data;
+  const id = String(data.id ?? "");
+  const sequenceId =
+    typeof data.sequence_id === "number"
+      ? data.sequence_id
+      : undefined;
+  const name = String(data.name ?? title);
+  const priority = String(data.priority ?? "none");
+  const createdAt = String(data.created_at ?? new Date().toISOString());
+  const permalink = `https://app.plane.so/${config.workspace_slug}/projects/${config.project_id}/issues/${id}`;
+
+  const issue: UnifiedIssue = {
+    source: "plane",
+    id,
+    sequence_id: sequenceId,
+    title: name,
+    description: "",
+    state_id: stateId,
+    state_name: "",
+    state_group: "",
+    state_hex: "",
+    priority,
+    link: permalink,
+    updated_at: createdAt,
+  };
+
+  return { ok: true, issue };
+}
+
 // ── patch issue state ───────────────────────────────────────────────
 
 export async function patchIssueState(
