@@ -188,10 +188,10 @@ export function buildWidgetLines(
     }
   }
 
-  // In-progress issue titles (started group)
+  // In-progress issue titles (state name is "In Progress")
   if (planeCache && planeCache.issues) {
     const startedIssues = planeCache.issues.filter(
-      (i) => i.state_group === "started",
+      (i) => i.state_name === "In Progress",
     );
     const MAX_INPROGRESS_SHOWN = 5;
     const shown = startedIssues.slice(0, MAX_INPROGRESS_SHOWN);
