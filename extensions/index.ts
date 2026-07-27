@@ -479,10 +479,7 @@ async function showOverlay(
     ui: {
       custom: (
         factory: (...args: unknown[]) => unknown,
-        opts: {
-          overlay: boolean;
-          onHandle?: (h: { close: () => void }) => void;
-        },
+        options?: Record<string, unknown>,
       ) => Promise<null>;
     };
   };
@@ -529,8 +526,10 @@ async function showOverlay(
     },
     {
       overlay: true,
-      onHandle: (handle: { close: () => void }) => {
-        overlayHandle = handle;
+      overlayOptions: {
+        anchor: "top-left",
+        width: "100%",
+        maxHeight: "100%",
       },
     },
   );
@@ -553,10 +552,7 @@ async function showTimesOverlay(
     ui: {
       custom: (
         factory: (...args: unknown[]) => unknown,
-        opts: {
-          overlay: boolean;
-          onHandle?: (h: { close: () => void }) => void;
-        },
+        options?: Record<string, unknown>,
       ) => Promise<null>;
     };
   };
@@ -592,8 +588,10 @@ async function showTimesOverlay(
     },
     {
       overlay: true,
-      onHandle: (handle: { close: () => void }) => {
-        overlayHandle = handle;
+      overlayOptions: {
+        anchor: "top-left",
+        width: "100%",
+        maxHeight: "100%",
       },
     },
   );

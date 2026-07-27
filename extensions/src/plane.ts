@@ -75,7 +75,8 @@ export function hexToAnsi(hex: string, text: string): string {
   const g = parseInt(raw.slice(2, 4), 16);
   const b = parseInt(raw.slice(4, 6), 16);
   if (isNaN(r) || isNaN(g) || isNaN(b)) return text;
-  return `\x1b[38;2;${r};${g};${b}m${text}\x1b[0m`;
+  // Use foreground-only reset so parent background styling survives
+  return `\x1b[38;2;${r};${g};${b}m${text}\x1b[39m`;
 }
 
 function relativeLuminance(r: number, g: number, b: number): number {
@@ -94,7 +95,8 @@ export function statePill(hex: string, text: string): string {
   const fgR = relativeLuminance(r, g, b) > 0.5 ? 0 : 255;
   const fgG = fgR;
   const fgB = fgR;
-  return `\x1b[38;2;${fgR};${fgG};${fgB};48;2;${r};${g};${b}m${padded}\x1b[0m`;
+  // Use fg+bg specific resets so parent styling (e.g. selected row highlight) survives
+  return `\x1b[38;2;${fgR};${fgG};${fgB};48;2;${r};${g};${b}m${padded}\x1b[39m\x1b[49m`;
 }
 
 export function priorityLabel(priority: string): string {

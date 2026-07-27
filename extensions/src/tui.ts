@@ -23,6 +23,7 @@ import {
   Key,
   truncateToWidth,
   visibleWidth,
+  wrapTextWithAnsi,
 } from "@earendil-works/pi-tui";
 import * as cp from "node:child_process";
 import * as fs from "node:fs";
@@ -57,28 +58,13 @@ function sentryLevelLabel(level: string): string {
 // ── helpers ──────────────────────────────────────────────────────────
 
 function padOrTrunc(str: string, len: number): string {
-  if (str.length > len) return str.slice(0, len - 1) + "\u2026";
-  return str.padEnd(len);
+  // truncateToWidth injects \x1b[0m even for plain text; strip it to
+  // avoid breaking parent ANSI styling (e.g. t.bg selectedBg).
+  return truncateToWidth(str, len, "\u2026", true).replace(/\x1b\[0m/g, "");
 }
 
 function wrapText(text: string, width: number): string[] {
-  if (width <= 0) return [text];
-  const lines: string[] = [];
-  for (const paragraph of text.split("\n")) {
-    if (paragraph.length === 0) {
-      lines.push("");
-      continue;
-    }
-    let remaining = paragraph;
-    while (remaining.length > width) {
-      let breakAt = remaining.lastIndexOf(" ", width);
-      if (breakAt <= 0) breakAt = width;
-      lines.push(remaining.slice(0, breakAt).trimEnd());
-      remaining = remaining.slice(breakAt).trimStart();
-    }
-    if (remaining.length > 0) lines.push(remaining);
-  }
-  return lines;
+  return wrapTextWithAnsi(text, width);
 }
 
 function openUrl(url: string): void {
@@ -649,7 +635,7 @@ export class UnifiedOverlay {
     }
 
     if (this.detailIssue) {
-      const detailLines = this.renderDetail(width);
+      const detailLines = this.renderDetailMode(width);
       this.cachedWidth = width;
       this.cachedLines = detailLines;
       return detailLines;
@@ -668,7 +654,7 @@ export class UnifiedOverlay {
       (i) => i.source === "sentry",
     ).length;
     const title = `Issues (${this.filteredIssues.length}) [${FILTER_LABELS[this.filter]}] `;
-    const topDash = Math.max(0, innerW - title.length - 3);
+    const topDash = Math.max(0, innerW - visibleWidth(title) - 3);
     lines.push(
       B("\u250C\u2500 ") +
         t.fg("accent", title) +
@@ -682,7 +668,7 @@ export class UnifiedOverlay {
     const gapW = 6;
     const headerTitleW =
       innerW - slugW - stateW - priorityW - gapW;
-    const rowTitleW = headerTitleW;
+    const rowTitleW = headerTitleW - 1; // reserve 1 for row prefix (chevron/space)
 
     if (headerTitleW < 10) {
       const narrowTitle = padOrTrunc(
@@ -717,7 +703,7 @@ export class UnifiedOverlay {
       lines.push(
         B("\u2514" + "\u2500".repeat(innerW) + "\u2518"),
       );
-      return lines;
+      return lines.map((l) => truncateToWidth(l, width));
     }
 
     const header =
@@ -853,7 +839,7 @@ export class UnifiedOverlay {
       innerW,
     );
     for (const fl of footerLines) {
-      lines.push(B("\u2502") + t.fg("dim", fl.padEnd(innerW)) + B("\u2502"));
+      lines.push(B("\u2502") + t.fg("dim", truncateToWidth(fl, innerW, "", true)) + B("\u2502"));
     }
 
     // ── bottom border ────────────────────────────────────────────
@@ -863,7 +849,7 @@ export class UnifiedOverlay {
 
     this.cachedWidth = width;
     this.cachedLines = lines;
-    return lines;
+    return lines.map((l) => truncateToWidth(l, width));
   }
 
   // ── dropdown modal ─────────────────────────────────────────────────
@@ -876,7 +862,7 @@ export class UnifiedOverlay {
 
     // ── top border ───────────────────────────────────────────────
     const title = `Change State `;
-    const topDash = Math.max(0, innerW - title.length - 3);
+    const topDash = Math.max(0, innerW - visibleWidth(title) - 3);
     lines.push(
       B("\u250C\u2500 ") +
         t.fg("accent", title) +
@@ -926,7 +912,7 @@ export class UnifiedOverlay {
       B("\u2514" + "\u2500".repeat(innerW) + "\u2518"),
     );
 
-    return lines;
+    return lines.map((l) => truncateToWidth(l, width));
   }
 
   // ── create-issue input mode ─────────────────────────────────────────
@@ -939,7 +925,7 @@ export class UnifiedOverlay {
 
     // ── top border ───────────────────────────────────────────────
     const title = "New Issue ";
-    const topDash = Math.max(0, innerW - title.length - 3);
+    const topDash = Math.max(0, innerW - visibleWidth(title) - 3);
     lines.push(
       B("\u250C\u2500 ") +
         t.fg("accent", title) +
@@ -987,7 +973,7 @@ export class UnifiedOverlay {
       innerW,
     );
     for (const fl of footerLines) {
-      lines.push(B("\u2502") + t.fg("dim", fl.padEnd(innerW)) + B("\u2502"));
+      lines.push(B("\u2502") + t.fg("dim", truncateToWidth(fl, innerW, "", true)) + B("\u2502"));
     }
 
     // ── bottom border ────────────────────────────────────────────
@@ -995,11 +981,10 @@ export class UnifiedOverlay {
       B("\u2514" + "\u2500".repeat(innerW) + "\u2518"),
     );
 
-    return lines;
+    return lines.map((l) => truncateToWidth(l, width));
   }
 
-  // ── detail view ──────────────────────────────────────────────────────
-  private renderDetail(width: number): string[] {
+  private renderDetailMode(width: number): string[] {
     const t = this.theme;
     const issue = this.detailIssue!;
     const B = (s: string) => t.fg("border", s);
@@ -1015,7 +1000,7 @@ export class UnifiedOverlay {
         : `Sentry #${issue.sentry_id}`;
     const icon = issue.source === "plane" ? "\uF273" : "\uF188";
     const title = `${icon}: ${id}`;
-    const topDash = Math.max(0, innerW - title.length - 3);
+    const topDash = Math.max(0, innerW - visibleWidth(title) - 3);
     lines.push(
       B("\u250C\u2500 ") +
         t.bg("selectedBg", t.fg("text", title)) +
@@ -1336,7 +1321,7 @@ export class UnifiedOverlay {
       innerW,
     );
     for (const fl of footerLines) {
-      lines.push(B("\u2502") + t.fg("dim", fl.padEnd(innerW)) + B("\u2502"));
+      lines.push(B("\u2502") + t.fg("dim", truncateToWidth(fl, innerW, "", true)) + B("\u2502"));
     }
 
     // ── bottom border ────────────────────────────────────────────
@@ -1344,7 +1329,7 @@ export class UnifiedOverlay {
       B("\u2514" + "\u2500".repeat(innerW) + "\u2518"),
     );
 
-    return lines;
+    return lines.map((l) => truncateToWidth(l, width));
   }
 
   invalidate(): void {
@@ -1451,7 +1436,7 @@ export class TimesOverlay {
     const dateStr = this.getLocalToday();
     const errorIcon = this.syncError ? " \uF06A" : "";
     const title = `Time \u2014 ${dateStr}${errorIcon} `;
-    const topDash = Math.max(0, innerW - title.length - 3);
+    const topDash = Math.max(0, innerW - visibleWidth(title) - 3);
     lines.push(
       B("\u250C\u2500 ") +
         t.fg("accent", title) +
@@ -1616,7 +1601,7 @@ export class TimesOverlay {
 
     this.cachedWidth = width;
     this.cachedLines = lines;
-    return lines;
+    return lines.map((l) => truncateToWidth(l, width));
   }
 
   invalidate(): void {
