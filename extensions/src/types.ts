@@ -247,3 +247,9 @@ export interface GitHubJobsDetail {
   total_count: number;
   jobs: GitHubJob[];
 }
+
+/** Passed to buildWidgetLines for rendering the Actions widget pill. */
+export interface GitHubWidgetStatus {
+  run: GitHubRun | null;
+  error?: "auth" | "api" | null;
+}

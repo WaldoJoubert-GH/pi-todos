@@ -2,6 +2,25 @@ import * as fs from "node:fs";
 import * as cp from "node:child_process";
 import * as os from "node:os";
 import * as path from "node:path";
+import type {
+  GitHubRun,
+  GitHubJob,
+  GitHubLatestCache,
+  GitHubActionsCache,
+  GitHubJobsDetail,
+  GitHubWidgetStatus,
+  DevConfig,
+} from "./types.js";
+import {
+  loadDevConfig,
+  saveDevConfig,
+  readLatestCache,
+  writeLatestCache,
+  readActionsCache,
+  writeActionsCache,
+  readJobsDetail,
+  writeJobsDetail,
+} from "./config.js";
 
 // ── constants ────────────────────────────────────────────────────────
 
@@ -12,6 +31,63 @@ const SECRETS_FILE = path.join(
   "secrets",
   "github.json",
 );
+
+const GITHUB_API = "https://api.github.com";
+
+export const LATEST_SYNC_INTERVAL_MS = 30_000;
+export const RUNS_SYNC_INTERVAL_MS = 5 * 60_000;
+
+// ── Nerd Font icons for run/job statuses (ADR 0004 reconciled set) ───
+
+export const GH_ICONS: Record<string, string> = {
+  success: "\uF14A",         // nf-fa-check_circle
+  failure: "\uF00D",         // nf-fa-times_circle
+  in_progress: "\uF110",     // nf-fa-spinner
+  queued: "\uF254",          // nf-fa-hourglass_half
+  cancelled: "\uF057",       // nf-fa-times_circle
+  skipped: "\uF04B",         // nf-fa-fast_forward
+  timed_out: "\uF253",       // nf-fa-hourglass_3 (avoid F017 collision with Daily Total)
+  action_required: "\uF06A", // nf-fa-exclamation_triangle
+  neutral: "\uF059",         // nf-fa-question_circle
+  stale: "\uF0EC",           // nf-fa-exchange
+  pending: "\uF254",         // nf-fa-hourglass_half (same as queued)
+  waiting: "\uF254",         // nf-fa-hourglass_half (same as queued)
+  no_runs: "\uF05E",         // nf-fa-check_circle (zero-state)
+  auth_error: "\uF06A",      // nf-fa-exclamation_triangle
+  api_error: "\uF06A",       // nf-fa-exclamation_triangle
+};
+
+/** Hex colors for each run/job status (ADR 0004). */
+export const GH_COLORS: Record<string, string> = {
+  success: "#22C55E",
+  failure: "#EF4444",
+  in_progress: "#F59E0B",
+  queued: "#9CA3AF",
+  cancelled: "#9CA3AF",
+  skipped: "#6B7280",
+  timed_out: "#EF4444",
+  action_required: "#F59E0B",
+  neutral: "#9CA3AF",
+  stale: "#9CA3AF",
+  pending: "#9CA3AF",
+  waiting: "#9CA3AF",
+};
+
+/** Labels for each status/conclusion used in the widget and overlay. */
+export const GH_LABELS: Record<string, string> = {
+  success: "Passing",
+  failure: "Failing",
+  in_progress: "Running",
+  queued: "Queued",
+  cancelled: "Cancelled",
+  skipped: "Skipped",
+  timed_out: "Timed out",
+  action_required: "Needs action",
+  neutral: "Neutral",
+  stale: "Stale",
+  pending: "Queued",
+  waiting: "Queued",
+};
 
 // ── git remote resolution ────────────────────────────────────────────
 
@@ -196,7 +272,323 @@ export function saveGitHubToken(token: string): void {
 
 // ── API fetch ─────────────────────────────────────────────────────────
 
-// (stub — will be filled in when data model ticket is resolved)
+export interface ResolvedGitHubConfig {
+  token: string;
+  owner: string;
+  repo: string;
+}
+
+/**
+ * Combine token + remote resolution into a ready-to-use config.
+ * Returns null when GitHub isn't available (no token, no git remote, etc.).
+ * Returns { ok: false, error } for explicit error states (auth failure).
+ */
+export function resolveGitHubConfig(
+  cwd: string,
+): { ok: true; config: ResolvedGitHubConfig } | { ok: false; reason: string } {
+  const token = loadGitHubToken();
+  if (!token) {
+    return { ok: false, reason: "no_token" };
+  }
+
+  // Check for repo_override in dev config
+  const devCfg = loadDevConfig(cwd);
+  if (devCfg.github?.repo_override) {
+    const [owner, repo] = devCfg.github.repo_override.split("/");
+    if (owner && repo) {
+      return { ok: true, config: { token, owner, repo } };
+    }
+    return { ok: false, reason: "invalid_repo_override" };
+  }
+
+  const remote = resolveGitHubRepo(cwd);
+  if (!remote.ok) {
+    return { ok: false, reason: remote.error };
+  }
+
+  return {
+    ok: true,
+    config: { token, owner: remote.repo.owner, repo: remote.repo.repo },
+  };
+}
+
+async function ghApiFetch(
+  config: ResolvedGitHubConfig,
+  apiPath: string,
+): Promise<
+  { ok: true; data: unknown } | { ok: false; error: string; status: number }
+> {
+  const headers: Record<string, string> = {
+    Authorization: `Bearer ${config.token}`,
+    Accept: "application/vnd.github+json",
+    "X-GitHub-Api-Version": "2022-11-28",
+  };
+
+  let resp: Response;
+  try {
+    resp = await fetch(`${GITHUB_API}${apiPath}`, { headers });
+  } catch (err: unknown) {
+    return {
+      ok: false,
+      error: err instanceof Error ? err.message : String(err),
+      status: 0,
+    };
+  }
+
+  if (!resp.ok) {
+    let body = "";
+    try {
+      body = await resp.text();
+    } catch {
+      /* ignore */
+    }
+    return {
+      ok: false,
+      error: `HTTP ${resp.status}: ${body.slice(0, 300)}`,
+      status: resp.status,
+    };
+  }
+
+  const data = await resp.json();
+  return { ok: true, data };
+}
+
+function slimRun(raw: Record<string, unknown>): GitHubRun {
+  const actor = raw.actor as Record<string, unknown> | undefined;
+  return {
+    id: raw.id as number,
+    name: (raw.name as string) ?? null,
+    display_title: (raw.display_title as string) ?? "",
+    status: (raw.status as string) ?? null,
+    conclusion: (raw.conclusion as string) ?? null,
+    head_branch: (raw.head_branch as string) ?? null,
+    event: (raw.event as string) ?? "",
+    run_number: raw.run_number as number,
+    workflow_id: raw.workflow_id as number,
+    created_at: (raw.created_at as string) ?? "",
+    updated_at: (raw.updated_at as string) ?? "",
+    run_started_at: (raw.run_started_at as string) ?? "",
+    actor_login: (actor?.login as string) ?? "",
+    html_url: (raw.html_url as string) ?? "",
+  };
+}
+
+function slimJob(raw: Record<string, unknown>): GitHubJob {
+  const stepsRaw = (raw.steps as Array<Record<string, unknown>>) ?? [];
+  return {
+    id: raw.id as number,
+    run_id: raw.run_id as number,
+    name: (raw.name as string) ?? "",
+    status: (raw.status as string) ?? "",
+    conclusion: (raw.conclusion as string) ?? null,
+    started_at: (raw.started_at as string) ?? "",
+    completed_at: (raw.completed_at as string) ?? null,
+    steps: stepsRaw.map((s) => ({
+      name: (s.name as string) ?? "",
+      status: (s.status as string) ?? "",
+      conclusion: (s.conclusion as string) ?? null,
+      number: s.number as number,
+      started_at: (s.started_at as string) ?? null,
+      completed_at: (s.completed_at as string) ?? null,
+    })),
+  };
+}
+
+export async function fetchLatestRun(
+  config: ResolvedGitHubConfig,
+): Promise<GitHubLatestCache> {
+  const res = await ghApiFetch(
+    config,
+    `/repos/${config.owner}/${config.repo}/actions/runs?per_page=1`,
+  );
+
+  const now = new Date().toISOString();
+  if (!res.ok) {
+    return {
+      fetched_at: now,
+      owner: config.owner,
+      repo: config.repo,
+      run: null, // API error — consumer checks fetched_at age
+    };
+  }
+
+  const data = res.data as {
+    workflow_runs?: Array<Record<string, unknown>>;
+    total_count?: number;
+  };
+
+  const runs = data.workflow_runs ?? [];
+  const run = runs.length > 0 ? slimRun(runs[0]) : null;
+
+  return {
+    fetched_at: now,
+    owner: config.owner,
+    repo: config.repo,
+    run,
+  };
+}
+
+export async function fetchActionsRuns(
+  config: ResolvedGitHubConfig,
+): Promise<{ ok: true; cache: GitHubActionsCache } | { ok: false; error: string }> {
+  const res = await ghApiFetch(
+    config,
+    `/repos/${config.owner}/${config.repo}/actions/runs?per_page=30`,
+  );
+
+  if (!res.ok) {
+    return { ok: false, error: res.error };
+  }
+
+  const data = res.data as {
+    workflow_runs?: Array<Record<string, unknown>>;
+    total_count?: number;
+  };
+
+  const cache: GitHubActionsCache = {
+    fetched_at: new Date().toISOString(),
+    owner: config.owner,
+    repo: config.repo,
+    total_count: data.total_count ?? 0,
+    runs: (data.workflow_runs ?? []).map(slimRun),
+  };
+
+  return { ok: true, cache };
+}
+
+export async function fetchRunJobs(
+  config: ResolvedGitHubConfig,
+  runId: number,
+): Promise<{ ok: true; detail: GitHubJobsDetail } | { ok: false; error: string }> {
+  const res = await ghApiFetch(
+    config,
+    `/repos/${config.owner}/${config.repo}/actions/runs/${runId}/jobs`,
+  );
+
+  if (!res.ok) {
+    return { ok: false, error: res.error };
+  }
+
+  const data = res.data as {
+    jobs?: Array<Record<string, unknown>>;
+    total_count?: number;
+  };
+
+  const detail: GitHubJobsDetail = {
+    fetched_at: new Date().toISOString(),
+    run_id: runId,
+    total_count: data.total_count ?? 0,
+    jobs: (data.jobs ?? []).map(slimJob),
+  };
+
+  return { ok: true, detail };
+}
+
+/** Fetch the authenticated GitHub user login (for "my" filter). */
+export async function fetchGitHubUser(
+  config: ResolvedGitHubConfig,
+): Promise<string | null> {
+  const res = await ghApiFetch(config, "/user");
+  if (!res.ok) return null;
+  const data = res.data as { login?: string };
+  return data.login ?? null;
+}
+
+// ── widget status helper ─────────────────────────────────────────────
+
+/**
+ * Build a GitHubWidgetStatus from the cached latest run, adding error
+ * state when the cache is stale or absent.
+ */
+export async function fetchWidgetStatus(
+  cwd: string,
+  config: ResolvedGitHubConfig,
+): Promise<GitHubWidgetStatus> {
+  const cache = await fetchLatestRun(config);
+
+  // Check if API returned data (run=null means 0 runs, error, or empty)
+  // Distinguish: if fetched_at is stale (>2x sync interval = 60s), treat as API error
+  const cacheAge = Date.now() - new Date(cache.fetched_at).getTime();
+  if (cacheAge > 60_000 && cache.run === null) {
+    // We tried but got no data — could be auth or API
+    return { run: null, error: "api" };
+  }
+
+  // Write cache
+  writeLatestCache(cwd, cache);
+
+  return { run: cache.run ?? null, error: null };
+}
+
+// ── interactive setup ────────────────────────────────────────────────
+
+export async function ensureGitHubSetup(ctx: {
+  hasUI: boolean;
+  ui: {
+    input(p: string): Promise<string | undefined>;
+    notify(m: string, t?: string): void;
+  };
+  cwd: string;
+}): Promise<ResolvedGitHubConfig | null> {
+  if (!ctx.hasUI) {
+    console.log(
+      "=== /actions ===\n" +
+        "To use this command interactively, run pi without --print/-p.\n\n" +
+        "Manual setup:\n" +
+        `  1. Save your GitHub PAT to ${SECRETS_FILE}:\n` +
+        '     { "token": "ghp_..." }\n' +
+        "     (requires actions:read scope for fine-grained tokens)\n" +
+        "  2. Run /actions from a repo with a GitHub remote (origin or first remote)\n" +
+        "  3. Or override: add { \"github\": { \"repo_override\": \"owner/repo\" } } to .dev/config.json\n",
+    );
+    return null;
+  }
+
+  let token = loadGitHubToken();
+  if (!token) {
+    const input = await ctx.ui.input(
+      "Enter your GitHub Personal Access Token (Settings > Developer settings > PAT, scope: actions:read):",
+    );
+    if (!input || input.trim().length === 0) {
+      ctx.ui.notify("No token provided — aborting.", "error");
+      return null;
+    }
+    token = input.trim();
+    saveGitHubToken(token);
+    ctx.ui.notify(
+      "Token saved to ~/.pi/agent/secrets/github.json",
+      "info",
+    );
+  }
+
+  // Check if remote resolution works
+  const resolved = resolveGitHubConfig(ctx.cwd);
+  if (!resolved.ok) {
+    // Offer repo_override
+    const overrideInput = await ctx.ui.input(
+      `Could not resolve a GitHub remote (${resolved.reason}). Enter an owner/repo override (e.g. "myorg/myrepo") or press Esc to cancel:`,
+    );
+    if (!overrideInput || overrideInput.trim().length === 0) {
+      ctx.ui.notify("No repo override — aborting.", "error");
+      return null;
+    }
+    const parts = overrideInput.trim().split("/");
+    if (parts.length !== 2 || !parts[0] || !parts[1]) {
+      ctx.ui.notify("Invalid format. Use owner/repo (e.g. myorg/myrepo).", "error");
+      return null;
+    }
+
+    // Save repo_override to dev config
+    const devCfg = loadDevConfig(ctx.cwd);
+    devCfg.github = { ...devCfg.github, repo_override: overrideInput.trim() };
+    saveDevConfig(ctx.cwd, devCfg);
+    ctx.ui.notify("Repo override saved to .dev/config.json", "info");
+
+    return { token, owner: parts[0], repo: parts[1] };
+  }
+
+  return resolved.config;
+}
 
 // ── format helpers ────────────────────────────────────────────────────
 

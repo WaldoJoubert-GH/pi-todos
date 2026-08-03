@@ -11,8 +11,13 @@ import {
   loadDevConfig,
   updatePlaneConfig,
   readAutotaskCache,
+  readLatestCache,
+  readActionsCache,
+  writeActionsCache,
+  readJobsDetail,
+  writeJobsDetail,
 } from "./src/config.js";
-import type { UnifiedIssue, PlaneCache, TimeEntry, PlaneStateItem } from "./src/types.js";
+import type { UnifiedIssue, PlaneCache, TimeEntry, PlaneStateItem, GitHubWidgetStatus, GitHubRun, GitHubJob } from "./src/types.js";
 import {
   ensurePlaneSetup,
   fetchProjectIdentifier,
@@ -42,7 +47,7 @@ import {
   upsertSentryUnifiedIssue,
   formatSentrySummary,
 } from "./src/sentry.js";
-import { UnifiedOverlay, TimesOverlay, buildWidgetLines } from "./src/tui.js";
+import { UnifiedOverlay, TimesOverlay, ActionsOverlay, buildWidgetLines } from "./src/tui.js";
 import { registerTools } from "./src/tools.js";
 import {
   ensureAutotaskSetup,
@@ -54,6 +59,21 @@ import {
   formatAutotaskForTool,
 } from "./src/autotask.js";
 import type { ResolvedAutotaskConfig } from "./src/types.js";
+import {
+  resolveGitHubConfig,
+  resolveGitHubRepo,
+  loadGitHubToken,
+  saveGitHubToken,
+  fetchLatestRun,
+  fetchActionsRuns,
+  fetchRunJobs,
+  fetchWidgetStatus,
+  ensureGitHubSetup,
+  fetchGitHubUser,
+  LATEST_SYNC_INTERVAL_MS,
+  RUNS_SYNC_INTERVAL_MS,
+} from "./src/github.js";
+import type { ResolvedGitHubConfig } from "./src/github.js";
 
 // ── extension state ──────────────────────────────────────────────────
 
@@ -69,10 +89,19 @@ let autotaskTotalHours: number | null = null;
 let autotaskSyncTimer: ReturnType<typeof setInterval> | null = null;
 let autotaskConfigForSync: ResolvedAutotaskConfig | null = null;
 
+// GitHub Actions state
+let ghLatestTimer: ReturnType<typeof setInterval> | null = null;
+let ghRunsTimer: ReturnType<typeof setInterval> | null = null;
+let ghWidgetStatus: GitHubWidgetStatus | null = null;
+let ghConfig: ResolvedGitHubConfig | null = null;
+let ghActorLogin: string | null = null;
+let ghSyncError: string | null = null;
+
 // ── widget timer ─────────────────────────────────────────────────────
 
 function startWidgetTimer(ctx: {
   ui: { setWidget: (name: string, lines: string[]) => void };
+  cwd: string;
 }): void {
   if (widgetTimerInterval) return;
   widgetTimerInterval = setInterval(() => {
@@ -136,6 +165,7 @@ function refreshWidget(ctx: {
       getPackageRepoUrlPublic(),
       dailyTotalMs,
       widgetProjectIdentifier,
+      ghWidgetStatus,
     ),
   );
 }
@@ -459,6 +489,77 @@ function startAutotaskSync(ctx: {
   );
 }
 
+// ── github actions sync ─────────────────────────────────────────────
+
+let syncingGhLatest = false;
+
+async function doGhLatestSync(ctx: {
+  ui: { setWidget: (name: string, lines: string[]) => void };
+  cwd: string;
+}): Promise<void> {
+  if (syncingGhLatest || !ghConfig) return;
+  syncingGhLatest = true;
+
+  try {
+    const status = await fetchWidgetStatus(ctx.cwd, ghConfig);
+    ghWidgetStatus = status;
+    refreshWidget(ctx);
+  } catch {
+    ghWidgetStatus = { run: null, error: "api" };
+    refreshWidget(ctx);
+  } finally {
+    syncingGhLatest = false;
+  }
+}
+
+function startGhLatestSync(ctx: {
+  ui: { setWidget: (name: string, lines: string[]) => void };
+  cwd: string;
+}): void {
+  if (ghLatestTimer) return;
+  doGhLatestSync(ctx);
+  ghLatestTimer = setInterval(
+    () => doGhLatestSync(ctx),
+    LATEST_SYNC_INTERVAL_MS,
+  );
+}
+
+let syncingGhRuns = false;
+
+async function doGhRunsSync(ctx: {
+  ui: { setWidget: (name: string, lines: string[]) => void };
+  cwd: string;
+}): Promise<void> {
+  if (syncingGhRuns || !ghConfig) return;
+  syncingGhRuns = true;
+
+  try {
+    const res = await fetchActionsRuns(ghConfig);
+    if (res.ok) {
+      writeActionsCache(ctx.cwd, res.cache);
+      ghSyncError = null;
+    } else {
+      ghSyncError = res.error;
+    }
+  } catch {
+    ghSyncError = "GH sync failed";
+  } finally {
+    syncingGhRuns = false;
+  }
+}
+
+function startGhRunsSync(ctx: {
+  ui: { setWidget: (name: string, lines: string[]) => void };
+  cwd: string;
+}): void {
+  if (ghRunsTimer) return;
+  doGhRunsSync(ctx);
+  ghRunsTimer = setInterval(
+    () => doGhRunsSync(ctx),
+    RUNS_SYNC_INTERVAL_MS,
+  );
+}
+
 // ── overlay display ──────────────────────────────────────────────────
 
 interface TuiHandle {
@@ -600,6 +701,64 @@ async function showTimesOverlay(
   overlayHandle = null;
 }
 
+// ── actions overlay display ────────────────────────────────────────
+
+async function showActionsOverlay(
+  ctx: never,
+  runs: GitHubRun[],
+  ownerRepo: string,
+  actorLogin: string | null,
+  onFetchJobs: (runId: number) => Promise<GitHubJob[]>,
+): Promise<void> {
+  const ui = ctx as unknown as {
+    ui: {
+      custom: (
+        factory: (...args: unknown[]) => unknown,
+        options?: Record<string, unknown>,
+      ) => Promise<null>;
+    };
+  };
+
+  await ui.ui.custom(
+    (
+      tui: TuiHandle,
+      theme: {
+        fg: (color: string, text: string) => string;
+        bg: (color: string, text: string) => string;
+      },
+      _keybindings: unknown,
+      done: (result: null) => void,
+    ) => {
+      const component = new ActionsOverlay(
+        runs,
+        theme,
+        () => done(null),
+        actorLogin,
+        onFetchJobs,
+        ownerRepo,
+      );
+      component.requestRender = () => tui.requestRender();
+      return {
+        render: (w: number) => component.render(w),
+        invalidate: () => component.invalidate(),
+        handleInput: (data: string) => {
+          component.handleInput(data);
+          component.invalidate();
+          tui.requestRender();
+        },
+      };
+    },
+    {
+      overlay: true,
+      overlayOptions: {
+        anchor: "top-left",
+        width: "100%",
+        maxHeight: "100%",
+      },
+    },
+  );
+}
+
 // ── extension ────────────────────────────────────────────────────────
 
 export default function (pi: ExtensionAPI) {
@@ -721,6 +880,29 @@ export default function (pi: ExtensionAPI) {
         refreshWidget(ctx);
       }
       startAutotaskSync(ctx);
+    }
+
+    // ── initialize github actions ──────────────────────────────
+    const ghResolved = resolveGitHubConfig(ctx.cwd);
+    if (ghResolved.ok) {
+      ghConfig = ghResolved.config;
+
+      // Fetch actor login for "my" filter
+      fetchGitHubUser(ghConfig)
+        .then((login) => {
+          ghActorLogin = login;
+        })
+        .catch(() => {});
+
+      // Try loading cached latest for widget
+      const latestCache = readLatestCache(ctx.cwd);
+      if (latestCache && latestCache.owner === ghConfig.owner && latestCache.repo === ghConfig.repo) {
+        ghWidgetStatus = { run: latestCache.run ?? null, error: null };
+      }
+
+      refreshWidget(ctx);
+      startGhLatestSync(ctx);
+      startGhRunsSync(ctx);
     }
   });
 
@@ -1154,6 +1336,123 @@ export default function (pi: ExtensionAPI) {
     },
   });
 
+  // ── command: /actions ────────────────────────────────────────
+  pi.registerCommand("actions", {
+    description:
+      "Show GitHub Actions workflow runs for the current repo",
+    handler: async (_args: string, ctx) => {
+      if (!ctx.hasUI) {
+        // Non-interactive mode
+        const ghResolved = resolveGitHubConfig(ctx.cwd);
+        if (!ghResolved.ok) {
+          console.log(
+            `GitHub Actions not configured: ${ghResolved.reason}. Run /actions interactively to set up.`,
+          );
+          return;
+        }
+
+        const result = await fetchActionsRuns(ghResolved.config);
+        if (!result.ok) {
+          console.log(`GitHub API error: ${result.error}`);
+          return;
+        }
+
+        console.log(`### GitHub Actions — ${ghResolved.config.owner}/${ghResolved.config.repo}`);
+        console.log(`Total runs: ${result.cache.total_count} (showing ${result.cache.runs.length})\n`);
+        for (const run of result.cache.runs) {
+          const conclusion =
+            run.status === "completed"
+              ? run.conclusion ?? "?"
+              : run.status ?? "?";
+          console.log(
+            `- #${run.run_number} ${run.name || run.display_title}  ` +
+              `Branch: ${run.head_branch ?? "?"}  ` +
+              `Event: ${run.event}  ` +
+              `${conclusion}  ` +
+              `[${run.html_url}]`,
+          );
+        }
+        return;
+      }
+
+      // Interactive mode
+      let resolved = resolveGitHubConfig(ctx.cwd);
+      if (!resolved.ok) {
+        // Try interactive setup
+        const setupResult = await ensureGitHubSetup(ctx);
+        if (!setupResult) return;
+        resolved = { ok: true, config: setupResult };
+
+        // Start GH sync now that we're configured
+        ghConfig = setupResult;
+        fetchGitHubUser(ghConfig)
+          .then((login) => {
+            ghActorLogin = login;
+          })
+          .catch(() => {});
+        startGhLatestSync(ctx);
+        startGhRunsSync(ctx);
+      }
+
+      // Fetch runs
+      ctx.ui.notify("Fetching workflow runs…", "info");
+
+      // Try cached first
+      const cached = readActionsCache(ctx.cwd);
+      let runs: GitHubRun[] = [];
+
+      if (
+        cached &&
+        cached.owner === resolved.config.owner &&
+        cached.repo === resolved.config.repo
+      ) {
+        runs = cached.runs;
+      }
+
+      if (runs.length === 0) {
+        const result = await fetchActionsRuns(resolved.config);
+        if (result.ok) {
+          runs = result.cache.runs;
+          writeActionsCache(ctx.cwd, result.cache);
+        } else {
+          ctx.ui.notify(
+            `Failed to fetch runs: ${result.error}`,
+            "error",
+          );
+          return;
+        }
+      }
+
+      const ownerRepo = `${resolved.config.owner}/${resolved.config.repo}`;
+
+      await showActionsOverlay(
+        ctx as never,
+        runs,
+        ownerRepo,
+        ghActorLogin,
+        async (runId: number): Promise<GitHubJob[]> => {
+          // Check cache first
+          const cachedJobs = readJobsDetail(ctx.cwd, runId);
+          if (cachedJobs) {
+            const age =
+              Date.now() - new Date(cachedJobs.fetched_at).getTime();
+            if (age < 5 * 60_000) {
+              // Cache valid for 5 min
+              return cachedJobs.jobs;
+            }
+          }
+
+          const res = await fetchRunJobs(resolved.config!, runId);
+          if (res.ok) {
+            writeJobsDetail(ctx.cwd, res.detail);
+            return res.detail.jobs;
+          }
+          return [];
+        },
+      );
+    },
+  });
+
   // ── cleanup ──────────────────────────────────────────────────
   pi.on("session_shutdown", async () => {
     if (syncTimer) {
@@ -1163,6 +1462,14 @@ export default function (pi: ExtensionAPI) {
     if (autotaskSyncTimer) {
       clearInterval(autotaskSyncTimer);
       autotaskSyncTimer = null;
+    }
+    if (ghLatestTimer) {
+      clearInterval(ghLatestTimer);
+      ghLatestTimer = null;
+    }
+    if (ghRunsTimer) {
+      clearInterval(ghRunsTimer);
+      ghRunsTimer = null;
     }
     stopWidgetTimer();
     overlayComponent = null;

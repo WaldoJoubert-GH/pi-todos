@@ -6,6 +6,9 @@ import type {
   AutotaskTimeRecord,
   AutotaskCache,
   PlaneStateItem,
+  GitHubWidgetStatus,
+  GitHubRun,
+  GitHubJob,
 } from "./types.js";
 import type { DashboardRow } from "./autotask.js";
 import {
@@ -17,6 +20,13 @@ import {
   formatTimestamp,
   GROUP_ORDER,
 } from "./plane.js";
+import {
+  GH_ICONS,
+  GH_COLORS,
+  GH_LABELS,
+  formatRelativeTime,
+  formatElapsed,
+} from "./github.js";
 import {
   decodeKittyPrintable,
   matchesKey,
@@ -123,6 +133,7 @@ export function buildWidgetLines(
   repoUrl: string | null,
   dailyTotalMs: number,
   projectIdentifier: string | null = null,
+  ghStatus: GitHubWidgetStatus | null = null,
 ): string[] {
   const lines: string[] = [];
 
@@ -139,11 +150,23 @@ export function buildWidgetLines(
   }
   // Daily total always visible
   parts.push(`\uF017 ${formatDurationHm(dailyTotalMs)}`);
+  // GitHub Actions segment (appended last on line 1)
+  if (ghStatus) {
+    parts.push(formatGhWidgetSegment(ghStatus));
+  }
   if (parts.length === 1 && planeCache === null) {
     // Only the daily total, no issues — prefix with zero-state
     lines.push(`\uF05E all clear  ${parts[0]}`);
   } else {
-    lines.push(parts.join("  "));
+    // Determine if we should show "all clear" — when there are no issues from any source
+    const hasIssues =
+      (planeCache && planeCache.total_active > 0) || sentryCount > 0;
+    if (!hasIssues && planeCache === null) {
+      // Reconstruct line 1 with all-clear prefix
+      lines.push(`\uF05E all clear  ${parts.join("  ")}`);
+    } else {
+      lines.push(parts.join("  "));
+    }
   }
 
   // Line 2+: Plane state pills (if plane configured)
@@ -230,6 +253,64 @@ export function buildWidgetLines(
   }
 
   return lines;
+}
+
+// ── GitHub Actions widget helper ──────────────────────────────────────
+
+/**
+ * Format a single segment for the GitHub Actions widget pill.
+ * Renders icon + label + relative/elapsed time per ADR 0004.
+ */
+function formatGhWidgetSegment(status: GitHubWidgetStatus): string {
+  // Error states
+  if (status.error === "auth") {
+    return `${GH_ICONS.auth_error} GH auth error`;
+  }
+  if (status.error === "api") {
+    return `${GH_ICONS.api_error} GH API error`;
+  }
+
+  // No runs yet
+  if (!status.run) {
+    return `${GH_ICONS.no_runs} No runs yet`;
+  }
+
+  const run = status.run;
+
+  // In-progress (running)
+  if (run.status === "in_progress") {
+    const icon = GH_ICONS.in_progress;
+    const elapsed = run.run_started_at
+      ? formatElapsed(run.run_started_at)
+      : "...";
+    return `${icon} Running \u00B7 ${elapsed} elapsed`;
+  }
+
+  // Queued / waiting / pending
+  if (
+    run.status === "queued" ||
+    run.status === "waiting" ||
+    run.status === "pending"
+  ) {
+    const icon = GH_ICONS[run.status] ?? GH_ICONS.queued;
+    return `${icon} Queued \u00B7 waiting`;
+  }
+
+  // Completed — use conclusion
+  if (run.status === "completed" && run.conclusion) {
+    const icon =
+      GH_ICONS[run.conclusion] ?? "\uF059";
+    const color =
+      GH_COLORS[run.conclusion] ?? "#9CA3AF";
+    const label =
+      GH_LABELS[run.conclusion] ?? run.conclusion;
+    const relative = formatRelativeTime(run.updated_at || run.created_at);
+    return `${hexToAnsi(color, icon)} ${hexToAnsi(color, `${label} \u00B7 ${relative}`)}`;
+  }
+
+  // Fallback: just show the status
+  const icon = GH_ICONS[run.status ?? ""] ?? "\uF059";
+  return `${icon} ${run.status ?? "unknown"}`;
 }
 
 // ── overlay component ────────────────────────────────────────────────
@@ -1615,4 +1696,698 @@ export class TimesOverlay {
     const local = new Date(now.getTime() + offsetMs);
     return local.toISOString().slice(0, 10);
   }
+}
+
+// ── GitHub Actions Overlay ──────────────────────────────────────────
+
+type ActionsFilter = "all" | "my" | "failed";
+
+const ACTIONS_FILTER_CYCLE: ActionsFilter[] = ["all", "my", "failed"];
+const ACTIONS_FILTER_LABELS: Record<ActionsFilter, string> = {
+  all: "All",
+  my: "\uF007 My",
+  failed: "\uF00D Failed",
+};
+
+/** Short-form labels for GitHub event types. */
+const EVENT_SHORT: Record<string, string> = {
+  push: "push",
+  pull_request: "pull_req",
+  schedule: "sched",
+  workflow_dispatch: "wf_disp",
+  release: "release",
+  fork: "fork",
+  tag: "push_tag",
+  issues: "issue",
+  pull_request_target: "pr_trgt",
+};
+
+export class ActionsOverlay {
+  private runs: GitHubRun[] = [];
+  private filter: ActionsFilter = "all";
+  private filteredRuns: GitHubRun[] = [];
+  private selected = 0;
+  private scrollOffset = 0;
+  private visibleHeight = 0;
+  private detailRun: GitHubRun | null = null;
+  private detailJobs: GitHubJob[] = [];
+  private detailScroll = 0;
+  private cachedWidth?: number;
+  private cachedLines?: string[];
+  private theme: {
+    fg: (color: string, text: string) => string;
+    bg: (color: string, text: string) => string;
+  };
+  private onClose: () => void;
+  private actorLogin: string | null;
+  private onFetchJobs: (runId: number) => Promise<GitHubJob[]>;
+  private ownerRepo: string;
+
+  requestRender: (() => void) | null = null;
+
+  constructor(
+    runs: GitHubRun[],
+    theme: {
+      fg: (color: string, text: string) => string;
+      bg: (color: string, text: string) => string;
+    },
+    onClose: () => void,
+    actorLogin: string | null,
+    onFetchJobs: (runId: number) => Promise<GitHubJob[]>,
+    ownerRepo: string,
+  ) {
+    this.runs = runs;
+    this.theme = theme;
+    this.onClose = onClose;
+    this.actorLogin = actorLogin;
+    this.onFetchJobs = onFetchJobs;
+    this.ownerRepo = ownerRepo;
+    this.applyFilter();
+  }
+
+  updateRuns(runs: GitHubRun[]): void {
+    this.runs = runs;
+    this.applyFilter();
+    this.invalidate();
+  }
+
+  private applyFilter(): void {
+    if (this.filter === "all") {
+      this.filteredRuns = [...this.runs];
+    } else if (this.filter === "my") {
+      this.filteredRuns = this.runs.filter(
+        (r) => r.actor_login === this.actorLogin,
+      );
+    } else if (this.filter === "failed") {
+      this.filteredRuns = this.runs.filter(
+        (r) =>
+          r.conclusion === "failure" ||
+          r.conclusion === "timed_out" ||
+          r.conclusion === "action_required",
+      );
+    }
+    this.selected = 0;
+    this.scrollOffset = 0;
+    this.detailRun = null;
+    this.detailScroll = 0;
+    this.invalidate();
+  }
+
+  handleInput(data: string): void {
+    // Detail view
+    if (this.detailRun !== null) {
+      if (matchesKey(data, Key.escape)) {
+        this.detailRun = null;
+        this.detailJobs = [];
+        this.detailScroll = 0;
+        this.invalidate();
+        return;
+      }
+      if (
+        matchesKey(data, Key.down) ||
+        matchesKey(data, Key.pageDown)
+      ) {
+        this.detailScroll++;
+        this.invalidate();
+        return;
+      }
+      if (
+        matchesKey(data, Key.up) ||
+        matchesKey(data, Key.pageUp)
+      ) {
+        this.detailScroll = Math.max(0, this.detailScroll - 1);
+        this.invalidate();
+        return;
+      }
+      if (matchesKey(data, Key.home)) {
+        this.detailScroll = 0;
+        this.invalidate();
+        return;
+      }
+      // Ctrl+Enter → open in browser
+      if (matchesKey(data, Key.ctrl("enter"))) {
+        if (this.detailRun?.html_url) {
+          openUrl(this.detailRun.html_url);
+        }
+        return;
+      }
+      return;
+    }
+
+    // List view
+    if (matchesKey(data, Key.up)) {
+      if (this.selected > 0) {
+        this.selected--;
+        this.ensureVisible();
+        this.invalidate();
+      }
+    } else if (matchesKey(data, Key.down)) {
+      if (this.selected < this.filteredRuns.length - 1) {
+        this.selected++;
+        this.ensureVisible();
+        this.invalidate();
+      }
+    } else if (matchesKey(data, Key.enter)) {
+      const run = this.filteredRuns[this.selected];
+      if (run) {
+        this.detailRun = run;
+        this.detailJobs = [];
+        this.detailScroll = 0;
+        this.invalidate();
+        // Fetch jobs async
+        this.onFetchJobs(run.id)
+          .then((jobs) => {
+            this.detailJobs = jobs;
+            this.invalidate();
+            this.requestRender?.();
+          })
+          .catch(() => {});
+      }
+    } else if (matchesKey(data, Key.escape)) {
+      this.onClose();
+    } else if (matchesKey(data, "f")) {
+      const idx = ACTIONS_FILTER_CYCLE.indexOf(this.filter);
+      this.filter =
+        ACTIONS_FILTER_CYCLE[
+          (idx + 1) % ACTIONS_FILTER_CYCLE.length
+        ];
+      this.applyFilter();
+    } else if (matchesKey(data, Key.home)) {
+      this.selected = 0;
+      this.scrollOffset = 0;
+      this.invalidate();
+    } else if (matchesKey(data, Key.end)) {
+      this.selected = this.filteredRuns.length - 1;
+      this.ensureVisible();
+      this.invalidate();
+    } else if (matchesKey(data, Key.pageUp)) {
+      this.selected = Math.max(
+        0,
+        this.selected - this.visibleHeight,
+      );
+      this.ensureVisible();
+      this.invalidate();
+    } else if (matchesKey(data, Key.pageDown)) {
+      const max = this.filteredRuns.length - 1;
+      this.selected = Math.min(
+        max,
+        this.selected + this.visibleHeight,
+      );
+      this.ensureVisible();
+      this.invalidate();
+    } else if (matchesKey(data, Key.ctrl("enter"))) {
+      const run = this.filteredRuns[this.selected];
+      if (run?.html_url) {
+        openUrl(run.html_url);
+      }
+    } else if (matchesKey(data, "c")) {
+      const run = this.filteredRuns[this.selected];
+      if (run?.html_url) {
+        copyToClipboard(run.html_url);
+      }
+    } else if (matchesKey(data, "r")) {
+      const run = this.filteredRuns[this.selected];
+      if (run?.html_url) {
+        // Open the re-run page (the run URL + re-run via browser)
+        openUrl(run.html_url);
+      }
+    }
+  }
+
+  private ensureVisible(): void {
+    if (this.selected < this.scrollOffset) {
+      this.scrollOffset = this.selected;
+    } else if (
+      this.selected >=
+      this.scrollOffset + this.visibleHeight
+    ) {
+      this.scrollOffset = this.selected - this.visibleHeight + 1;
+    }
+  }
+
+  render(width: number): string[] {
+    if (this.cachedLines && this.cachedWidth === width) {
+      return this.cachedLines;
+    }
+
+    if (this.detailRun) {
+      const result = this.renderDetail(width);
+      this.cachedWidth = width;
+      this.cachedLines = result;
+      return result;
+    }
+
+    const result = this.renderList(width);
+    this.cachedWidth = width;
+    this.cachedLines = result;
+    return result;
+  }
+
+  private renderList(width: number): string[] {
+    const lines: string[] = [];
+    const t = this.theme;
+    const B = (s: string) => t.fg("border", s);
+    const innerW = Math.max(1, width - 2);
+
+    // ── top border ───────────────────────────────────────────────
+    const title = `Actions (${this.filteredRuns.length}) [${ACTIONS_FILTER_LABELS[this.filter]}] `;
+    const topDash = Math.max(0, innerW - visibleWidth(title) - 3);
+    lines.push(
+      B("\u250C\u2500 ") +
+        t.fg("accent", title) +
+        B(" " + "\u2500".repeat(topDash) + "\u2510"),
+    );
+
+    // ── header row ───────────────────────────────────────────────
+    const statusW = 7;
+    const workflowW = 16;
+    const runW = 6;
+    const branchW = 10;
+    const eventW = 8;
+    const conclusionW = 10;
+    const timeW = 10;
+
+    const headerTitleW =
+      innerW - statusW - workflowW - runW - branchW - eventW - conclusionW - timeW;
+
+    if (headerTitleW < 0 || innerW < 50) {
+      // Narrow terminal — simplified view
+      const narrowMsg = padOrTrunc("Terminal too narrow", innerW);
+      lines.push(
+        B("\u2502") + t.fg("muted", narrowMsg) + B("\u2502"),
+      );
+      const maxVis = Math.min(
+        10,
+        this.filteredRuns.length,
+      );
+      for (let i = 0; i < maxVis; i++) {
+        const r = this.filteredRuns[i];
+        const icon = getRunStatusIcon(r);
+        const color = getRunStatusColor(r);
+        const label = `#${r.run_number} ${r.display_title || r.name || "?"}`;
+        const row = padOrTrunc(
+          ` ${icon} ${label}`,
+          innerW,
+        );
+        lines.push(
+          B("\u2502") +
+            hexToAnsi(color, row) +
+            B("\u2502"),
+        );
+      }
+      const remaining = this.filteredRuns.length - maxVis;
+      if (remaining > 0) {
+        lines.push(
+          B("\u2502") +
+            t.fg("muted", padOrTrunc(`\u2026 and ${remaining} more`, innerW)) +
+            B("\u2502"),
+        );
+      }
+      lines.push(
+        B("\u2514" + "\u2500".repeat(innerW) + "\u2518"),
+      );
+      return lines.map((l) => truncateToWidth(l, width));
+    }
+
+    const header =
+      padOrTrunc("Status", statusW) +
+      "  " +
+      padOrTrunc("Workflow", workflowW) +
+      "  " +
+      padOrTrunc("Run", runW) +
+      "  " +
+      padOrTrunc("Branch", branchW) +
+      "  " +
+      padOrTrunc("Event", eventW) +
+      "  " +
+      padOrTrunc("Conclusion", conclusionW) +
+      "  " +
+      padOrTrunc("Time", timeW);
+    lines.push(
+      B("\u2502") + t.fg("muted", header) + B("\u2502"),
+    );
+
+    // ── separator ────────────────────────────────────────────────
+    lines.push(
+      B("\u251C" + "\u2500".repeat(innerW) + "\u2524"),
+    );
+
+    // ── rows ─────────────────────────────────────────────────────
+    const maxVisible = Math.min(
+      25,
+      Math.max(5, Math.floor(innerW * 0.5)),
+    );
+    this.visibleHeight = maxVisible;
+
+    const endIdx = Math.min(
+      this.scrollOffset + maxVisible,
+      this.filteredRuns.length,
+    );
+    const displayRuns = this.filteredRuns.slice(
+      this.scrollOffset,
+      endIdx,
+    );
+
+    for (let i = 0; i < displayRuns.length; i++) {
+      const idx = this.scrollOffset + i;
+      const run = displayRuns[i];
+      const isSelected = idx === this.selected;
+
+      const icon = getRunStatusIcon(run);
+      const color = getRunStatusColor(run);
+      const statusStr = padOrTrunc(
+        `${hexToAnsi(color, icon)}`,
+        statusW,
+      );
+
+      const wfName = run.name || run.display_title || "?";
+      const wfStr = padOrTrunc(wfName, workflowW);
+
+      const runStr = padOrTrunc(`#${run.run_number}`, runW);
+
+      const branch = run.head_branch ?? "?";
+      const branchStr = padOrTrunc(branch, branchW);
+
+      const eventShort =
+        EVENT_SHORT[run.event] ?? run.event.slice(0, 8);
+      const eventStr = padOrTrunc(eventShort, eventW);
+
+      const conclusion =
+        run.status === "completed"
+          ? run.conclusion ?? "?"
+          : run.status ?? "?";
+      const conclusionStr = padOrTrunc(conclusion, conclusionW);
+
+      const timeLabel = getRunTimeLabel(run);
+      const timeStr = padOrTrunc(timeLabel, timeW);
+
+      const rowContent = `${statusStr}  ${wfStr}  ${runStr}  ${branchStr}  ${eventStr}  ${conclusionStr}  ${timeStr}`;
+
+      if (isSelected) {
+        const content = t.bg(
+          "selectedBg",
+          t.fg("text", `\uF054 ${rowContent}`),
+        );
+        const rowVis = visibleWidth(`  ${rowContent}`);
+        const padLen = Math.max(0, innerW - rowVis - 1);
+        lines.push(
+          B("\u2502") + content + " ".repeat(padLen) + B("\u2502"),
+        );
+      } else {
+        const rowVis = visibleWidth(`  ${rowContent}`);
+        const padLen = Math.max(0, innerW - rowVis - 1);
+        lines.push(
+          B("\u2502") +
+            `  ${rowContent}` +
+            " ".repeat(padLen) +
+            B("\u2502"),
+        );
+      }
+    }
+
+    // ── scroll indicator ─────────────────────────────────────────
+    if (endIdx < this.filteredRuns.length) {
+      const remaining = this.filteredRuns.length - endIdx;
+      const indicator = padOrTrunc(
+        `\uF103 ${remaining} more`,
+        innerW,
+      );
+      lines.push(
+        B("\u2502") + t.fg("muted", indicator) + B("\u2502"),
+      );
+    }
+
+    // ── footer separator ─────────────────────────────────────────
+    lines.push(
+      B("\u251C" + "\u2500".repeat(innerW) + "\u2524"),
+    );
+
+    // ── footer ───────────────────────────────────────────────────
+    const footerLines = wrapText(
+      "\uF102\uF103 scroll  Enter details  f filter  r rerun  Ctrl+Enter open  c copy  Esc close",
+      innerW,
+    );
+    for (const fl of footerLines) {
+      lines.push(
+        B("\u2502") +
+          t.fg("dim", truncateToWidth(fl, innerW, "", true)) +
+          B("\u2502"),
+      );
+    }
+
+    // ── bottom border ────────────────────────────────────────────
+    lines.push(
+      B("\u2514" + "\u2500".repeat(innerW) + "\u2518"),
+    );
+
+    return lines.map((l) => truncateToWidth(l, width));
+  }
+
+  private renderDetail(width: number): string[] {
+    const t = this.theme;
+    const run = this.detailRun!;
+    const B = (s: string) => t.fg("border", s);
+    const innerW = Math.max(1, width - 2);
+    const lines: string[] = [];
+
+    // ── top border ───────────────────────────────────────────────
+    const icon = getRunStatusIcon(run);
+    const color = getRunStatusColor(run);
+    const title = `${hexToAnsi(color, icon)} ${run.name || run.display_title} #${run.run_number}`;
+    const topDash = Math.max(
+      0,
+      innerW - visibleWidth(title) - 3,
+    );
+    lines.push(
+      B("\u250C\u2500 ") +
+        t.fg("accent", title) +
+        B(" " + "\u2500".repeat(topDash) + "\u2510"),
+    );
+
+    // ── metadata banner ──────────────────────────────────────────
+    const branch = run.head_branch ?? "?";
+    const eventShort = EVENT_SHORT[run.event] ?? run.event;
+    const conclusion =
+      run.status === "completed"
+        ? run.conclusion ?? "?"
+        : run.status ?? "?";
+    const actor = run.actor_login || "?";
+    const relative = getRunTimeLabel(run);
+    const meta = `${branch} \u00B7 ${eventShort} \u00B7 ${conclusion} \u00B7 triggered by ${actor} \u00B7 ${relative}`;
+    const metaLines = wrapText(meta, innerW);
+    for (const ml of metaLines) {
+      const mlPad = Math.max(0, innerW - visibleWidth(ml));
+      lines.push(
+        B("\u2502") + t.fg("muted", ml) + " ".repeat(mlPad) + B("\u2502"),
+      );
+    }
+
+    // ── separator ────────────────────────────────────────────────
+    lines.push(
+      B("\u251C" + "\u2500".repeat(innerW) + "\u2524"),
+    );
+
+    // ── jobs header ──────────────────────────────────────────────
+    if (this.detailJobs.length === 0) {
+      const loading = padOrTrunc(
+        "  Loading jobs\u2026",
+        innerW,
+      );
+      lines.push(
+        B("\u2502") + t.fg("muted", loading) + B("\u2502"),
+      );
+    } else {
+      const passedCount = this.detailJobs.filter(
+        (j) => j.conclusion === "success" || j.conclusion === "skipped",
+      ).length;
+      const jobsHeader = `Jobs (${passedCount}/${this.detailJobs.length} passed)`;
+      const jhPad = Math.max(
+        0,
+        innerW - visibleWidth(jobsHeader),
+      );
+      lines.push(
+        B("\u2502") +
+          t.fg("accent", jobsHeader) +
+          " ".repeat(jhPad) +
+          B("\u2502"),
+      );
+      lines.push(B("\u2502") + " ".repeat(innerW) + B("\u2502"));
+
+      // ── job rows ───────────────────────────────────────────────
+      const nameW = 16;
+      const durW = 10;
+      const concW = 12;
+      const errorW = innerW - nameW - durW - concW - 10;
+
+      const maxVisJobs = Math.min(
+        20,
+        Math.max(4, Math.floor(innerW * 0.4)),
+      );
+      const jobsEnd = Math.min(
+        this.detailScroll + maxVisJobs,
+        this.detailJobs.length,
+      );
+
+      for (let i = this.detailScroll; i < jobsEnd; i++) {
+        const job = this.detailJobs[i];
+        const jIcon = getJobIcon(job);
+        const jColor = getJobColor(job);
+        const jStatusIcon = padOrTrunc(
+          `${hexToAnsi(jColor, jIcon)}`,
+          4,
+        );
+
+        const jName = padOrTrunc(job.name, nameW);
+
+        const jDur = job.completed_at
+          ? formatDuration(
+              new Date(job.completed_at).getTime() -
+                new Date(job.started_at).getTime(),
+            )
+          : job.started_at
+            ? formatElapsed(job.started_at)
+            : "\u2014";
+        const jDurStr = padOrTrunc(jDur, durW);
+
+        const jConclusion =
+          job.conclusion ?? job.status ?? "?";
+        const jConcStr = padOrTrunc(jConclusion, concW);
+
+        const jErrorHint =
+          job.conclusion === "failure" && errorW > 5
+            ? padOrTrunc(
+                getJobErrorHint(job),
+                errorW,
+              )
+            : "";
+
+        const jobRow = `${jStatusIcon}  ${jName}  ${jDurStr}  ${jConcStr} ${jErrorHint}`;
+        const jobRowVis = visibleWidth(`  ${jobRow}`);
+        const jobPad = Math.max(0, innerW - jobRowVis);
+
+        if (job.conclusion === "failure") {
+          lines.push(
+            B("\u2502") +
+              t.fg("error", `  ${jobRow}`) +
+              " ".repeat(jobPad) +
+              B("\u2502"),
+          );
+        } else if (job.conclusion === "skipped" || job.conclusion === "cancelled") {
+          lines.push(
+            B("\u2502") +
+              t.fg("dim", `  ${jobRow}`) +
+              " ".repeat(jobPad) +
+              B("\u2502"),
+          );
+        } else {
+          lines.push(
+            B("\u2502") +
+              `  ${jobRow}` +
+              " ".repeat(jobPad) +
+              B("\u2502"),
+          );
+        }
+      }
+
+      if (jobsEnd < this.detailJobs.length) {
+        const remaining = this.detailJobs.length - jobsEnd;
+        const indicator = padOrTrunc(
+          `\uF103 ${remaining} more jobs`,
+          innerW,
+        );
+        lines.push(
+          B("\u2502") +
+            t.fg("muted", indicator) +
+            B("\u2502"),
+        );
+      }
+    }
+
+    // ── separator ────────────────────────────────────────────────
+    lines.push(
+      B("\u251C" + "\u2500".repeat(innerW) + "\u2524"),
+    );
+
+    // ── footer ───────────────────────────────────────────────────
+    const footerLines = wrapText(
+      "Esc back  \uF102\uF103 scroll  Ctrl+Enter open  r rerun  c copy",
+      innerW,
+    );
+    for (const fl of footerLines) {
+      lines.push(
+        B("\u2502") +
+          t.fg("dim", truncateToWidth(fl, innerW, "", true)) +
+          B("\u2502"),
+      );
+    }
+
+    // ── bottom border ────────────────────────────────────────────
+    lines.push(
+      B("\u2514" + "\u2500".repeat(innerW) + "\u2518"),
+    );
+
+    return lines.map((l) => truncateToWidth(l, width));
+  }
+
+  invalidate(): void {
+    this.cachedWidth = undefined;
+    this.cachedLines = undefined;
+  }
+}
+
+// ── GitHub Actions helper functions ──────────────────────────────────
+
+function getRunStatusKey(run: GitHubRun): string {
+  if (run.status === "completed" && run.conclusion) {
+    return run.conclusion;
+  }
+  return run.status ?? "queued";
+}
+
+function getRunStatusIcon(run: GitHubRun): string {
+  const key = getRunStatusKey(run);
+  return GH_ICONS[key] ?? GH_ICONS.queued;
+}
+
+function getRunStatusColor(run: GitHubRun): string {
+  const key = getRunStatusKey(run);
+  return GH_COLORS[key] ?? "#9CA3AF";
+}
+
+function getRunTimeLabel(run: GitHubRun): string {
+  if (run.status === "in_progress") {
+    return formatElapsed(run.run_started_at || run.created_at);
+  }
+  if (
+    run.status === "queued" ||
+    run.status === "waiting" ||
+    run.status === "pending"
+  ) {
+    return "waiting";
+  }
+  return formatRelativeTime(run.updated_at || run.created_at);
+}
+
+function getJobIcon(job: GitHubJob): string {
+  if (job.status === "completed" && job.conclusion) {
+    return GH_ICONS[job.conclusion] ?? GH_ICONS.neutral;
+  }
+  return GH_ICONS[job.status] ?? GH_ICONS.in_progress;
+}
+
+function getJobColor(job: GitHubJob): string {
+  if (job.status === "completed" && job.conclusion) {
+    return GH_COLORS[job.conclusion] ?? "#9CA3AF";
+  }
+  return GH_COLORS[job.status] ?? "#9CA3AF";
+}
+
+/** Return a short error hint from the failed job (first failed step name). */
+function getJobErrorHint(job: GitHubJob): string {
+  if (job.steps.length === 0) return "";
+  const failedStep = job.steps.find((s) => s.conclusion === "failure");
+  if (failedStep) {
+    return `(${failedStep.name})`;
+  }
+  return "";
 }
