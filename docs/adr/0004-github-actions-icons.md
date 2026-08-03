@@ -24,15 +24,19 @@ The widget uses Nerd Font Private Use Area codepoints from Font Awesome (v4.7, v
 
 ## Decision
 
+**Final set (reconciled from Widget ADR, timed_out fixed to avoid Daily Total collision):**
+
 | GitHub Status | Icon Name | Codepoint | Character | Rationale |
 |---|---|---|---|---|
-| `queued` | `nf-fa-hourglass_o` | `U+F250` |  | Empty hourglass — waiting to begin |
-| `in_progress` | `nf-fa-circle_o_notch` | `U+F1CE` |  | Circular spinner/notch — active execution |
-| `success` | `nf-fa-check` | `U+F00C` |  | Check mark — passed |
-| `failure` | `nf-fa-times` | `U+F00D` |  | X mark — failed |
-| `cancelled` | `nf-fa-minus_circle` | `U+F056` |  | Minus in circle — explicitly cancelled |
-| `skipped` | `nf-fa-fast_forward` | `U+F050` |  | Fast-forward arrows — conditionally skipped |
-| `timed_out` | `nf-fa-hourglass_3` | `U+F253` |  | Hourglass expired (sand at bottom) — time ran out |
+| `queued` | `nf-fa-hourglass_half` | `U+F254` |  | Half-spent hourglass — waiting to start |
+| `in_progress` | `nf-fa-spinner` | `U+F110` |  | Animated spinner — active execution |
+| `success` | `nf-fa-check_circle` | `U+F14A` |  | Check in circle — passed |
+| `failure` | `nf-fa-times_circle` | `U+F00D` |  | X in circle — failed |
+| `cancelled` | `nf-fa-times_circle` | `U+F057` |  | Times circle — explicitly cancelled |
+| `skipped` | `nf-fa-play` | `U+F04B` |  | Play/triangle — conditionally skipped |
+| `timed_out` | `nf-fa-hourglass_3` | `U+F253` |  | Hourglass fully spent — time ran out |
+
+⚠️ F017 (clock-o) excluded for timed_out because it collides with the Daily Total icon. F253 (hourglass_3) is the collision-free alternative. All other choices from the Widget ADR.
 
 ## Collision audit
 
@@ -40,7 +44,7 @@ Checked against all 15 existing PUA codepoints used in `extensions/src/tui.ts`:
 
 ```
 Existing: F017 F019 F040 F054 F05E F06A F0A9 F0EC F0F1 F102 F103 F121 F188 F252 F273
-Proposed: F00C F00D F050 F056 F1CE F250 F253
+Reconciled: F00D F04B F057 F110 F14A F253 F254
 
 Intersection: (none)
 ```
