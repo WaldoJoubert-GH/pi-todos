@@ -21,6 +21,7 @@ Add a GitHub Actions integration to pi-todos that:
 ## Decisions so far
 
 - [What GitHub Actions API endpoints do we call?](tickets/01-api-endpoints.md) — Three endpoints: list runs, get single run, list jobs. Latest-run-across-all-branches is a single `GET .../runs?per_page=1`. Rate limit 5,000/hr (negligible). PAT scope: `actions:read`.
+- [How do we resolve owner/repo from CWD's git remote?](tickets/02-resolve-owner-repo.md) — `resolveGitHubRepo()` in `extensions/src/github.ts`. Prefers `origin`, falls back to first alphabetical GitHub remote. Supports HTTPS, SSH, and `ssh://` URL formats. Token at `~/.pi/agent/secrets/github.json`. Includes `formatRelativeTime` and `formatElapsed` helpers.
 
 ## Not yet specified
 
