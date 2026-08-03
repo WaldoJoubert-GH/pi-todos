@@ -42,6 +42,7 @@ export interface DevConfig {
   plane?: PlaneConfig;
   sentry?: SentryConfig;
   autotask?: AutotaskConfig;
+  github?: GitHubConfig;
 }
 
 export interface PlaneConfig {
@@ -176,4 +177,73 @@ export interface AutotaskCache {
   fetched_at: string;
   date: string;
   items: AutotaskTimeRecord[];
+}
+
+// ── GitHub Actions types ─────────────────────────────────────────────
+
+export interface GitHubConfig {
+  repo_override?: string;
+}
+
+/** Slimmed from the GitHub REST API Workflow Run response. */
+export interface GitHubRun {
+  id: number;
+  name: string | null;
+  display_title: string;
+  status: string | null;       // "queued" | "in_progress" | "completed" | "waiting" | "pending"
+  conclusion: string | null;   // "success" | "failure" | "cancelled" | "skipped" | "timed_out" | "action_required" | "neutral" | "stale" | null
+  head_branch: string | null;
+  event: string;               // "push" | "pull_request" | "schedule" | "workflow_dispatch" | ...
+  run_number: number;
+  workflow_id: number;
+  created_at: string;
+  updated_at: string;
+  run_started_at: string;
+  actor_login: string;
+  html_url: string;
+}
+
+export interface GitHubStep {
+  name: string;
+  status: string;              // "queued" | "in_progress" | "completed"
+  conclusion: string | null;
+  number: number;
+  started_at: string | null;
+  completed_at: string | null;
+}
+
+export interface GitHubJob {
+  id: number;
+  run_id: number;
+  name: string;
+  status: string;              // "queued" | "in_progress" | "completed" | "waiting" | "requested" | "pending"
+  conclusion: string | null;   // "success" | "failure" | "neutral" | "cancelled" | "skipped" | "timed_out" | "action_required" | null
+  started_at: string;
+  completed_at: string | null;
+  steps: GitHubStep[];
+}
+
+/** Written to .dev/github/latest.json — single most recent run for the widget. */
+export interface GitHubLatestCache {
+  fetched_at: string;
+  owner: string;
+  repo: string;
+  run: GitHubRun | null;       // null when repo has no runs
+}
+
+/** Written to .dev/github/runs.json — up to 30 runs for the overlay list. */
+export interface GitHubActionsCache {
+  fetched_at: string;
+  owner: string;
+  repo: string;
+  total_count: number;
+  runs: GitHubRun[];
+}
+
+/** Written to .dev/github/jobs/<run_id>.json — fetched on detail drill-down. */
+export interface GitHubJobsDetail {
+  fetched_at: string;
+  run_id: number;
+  total_count: number;
+  jobs: GitHubJob[];
 }

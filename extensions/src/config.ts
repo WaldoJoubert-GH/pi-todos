@@ -11,6 +11,9 @@ import type {
   AutotaskCache,
   ResolvedAutotaskConfig,
   PlaneStatesCache,
+  GitHubLatestCache,
+  GitHubActionsCache,
+  GitHubJobsDetail,
 } from "./types.js";
 
 // ── secrets ─────────────────────────────────────────────────────────
@@ -328,6 +331,70 @@ export function loadPlaneStates(cwd: string): PlaneStatesCache | null {
 export function savePlaneStates(cwd: string, cache: PlaneStatesCache): void {
   ensureDevDir(cwd);
   fs.writeFileSync(planeStatesPath(cwd), JSON.stringify(cache, null, 2), "utf-8");
+}
+
+// ── github actions cache ─────────────────────────────────────────────
+
+export function githubDir(cwd: string): string {
+  const dir = path.join(devDir(cwd), "github");
+  fs.mkdirSync(dir, { recursive: true });
+  return dir;
+}
+
+export function latestCachePath(cwd: string): string {
+  return path.join(githubDir(cwd), "latest.json");
+}
+
+export function runsCachePath(cwd: string): string {
+  return path.join(githubDir(cwd), "runs.json");
+}
+
+export function jobsDetailPath(cwd: string, runId: number): string {
+  const dir = path.join(githubDir(cwd), "jobs");
+  fs.mkdirSync(dir, { recursive: true });
+  return path.join(dir, `${runId}.json`);
+}
+
+export function readLatestCache(cwd: string): GitHubLatestCache | null {
+  try {
+    const raw = fs.readFileSync(latestCachePath(cwd), "utf-8");
+    return JSON.parse(raw) as GitHubLatestCache;
+  } catch {
+    return null;
+  }
+}
+
+export function writeLatestCache(cwd: string, cache: GitHubLatestCache): void {
+  ensureDevDir(cwd);
+  fs.writeFileSync(latestCachePath(cwd), JSON.stringify(cache, null, 2), "utf-8");
+}
+
+export function readActionsCache(cwd: string): GitHubActionsCache | null {
+  try {
+    const raw = fs.readFileSync(runsCachePath(cwd), "utf-8");
+    return JSON.parse(raw) as GitHubActionsCache;
+  } catch {
+    return null;
+  }
+}
+
+export function writeActionsCache(cwd: string, cache: GitHubActionsCache): void {
+  ensureDevDir(cwd);
+  fs.writeFileSync(runsCachePath(cwd), JSON.stringify(cache, null, 2), "utf-8");
+}
+
+export function readJobsDetail(cwd: string, runId: number): GitHubJobsDetail | null {
+  try {
+    const raw = fs.readFileSync(jobsDetailPath(cwd, runId), "utf-8");
+    return JSON.parse(raw) as GitHubJobsDetail;
+  } catch {
+    return null;
+  }
+}
+
+export function writeJobsDetail(cwd: string, detail: GitHubJobsDetail): void {
+  ensureDevDir(cwd);
+  fs.writeFileSync(jobsDetailPath(cwd, detail.run_id), JSON.stringify(detail, null, 2), "utf-8");
 }
 
 // ── migration from old .todo/ and .sentry/ ──────────────────────────
