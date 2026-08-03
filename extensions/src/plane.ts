@@ -1,7 +1,6 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import * as os from "node:os";
-import * as cp from "node:child_process";
 import type {
   UnifiedIssue,
   RawPlaneIssue,
@@ -36,9 +35,6 @@ const SECRETS_FILE = path.join(
   "plane.json",
 );
 export const SYNC_INTERVAL_MS = 5 * 60 * 1000;
-const CURRENT_VERSION_FALLBACK = "1.0.1";
-const VERSION_CHECK_TIMEOUT_MS = 5000;
-
 const EXCLUDED_GROUPS = new Set(["completed", "cancelled"]);
 export const GROUP_ORDER = [
   "backlog",
@@ -138,95 +134,6 @@ export function formatTimestamp(iso: string): string {
   const hours = String(d.getHours()).padStart(2, "0");
   const minutes = String(d.getMinutes()).padStart(2, "0");
   return `${month}-${day} ${hours}:${minutes}`;
-}
-
-// ── version check ────────────────────────────────────────────────────
-
-function getOwnPackageJson(): Record<string, unknown> | null {
-  try {
-    const pkgPath = path.join(
-      os.homedir(),
-      ".pi",
-      "agent",
-      "git",
-      "github.com",
-      "WaldoJoubert-GH",
-      "pi-todos",
-      "package.json",
-    );
-    return JSON.parse(fs.readFileSync(pkgPath, "utf8"));
-  } catch {
-    return null;
-  }
-}
-
-function getCurrentVersion(): string {
-  const pkg = getOwnPackageJson();
-  if (pkg && typeof pkg.version === "string") return pkg.version;
-  return CURRENT_VERSION_FALLBACK;
-}
-
-function getPackageRepoUrl(): string | null {
-  const pkg = getOwnPackageJson();
-  if (!pkg) return null;
-  const repo = pkg.repository;
-  if (repo && typeof repo === "object" && repo !== null && "url" in repo) {
-    const url: unknown = (repo as Record<string, unknown>).url;
-    if (typeof url === "string" && url.length > 0) return url;
-  }
-  return null;
-}
-
-function isSemverNewer(a: string, b: string): boolean {
-  const parse = (v: string) => v.replace(/^v/, "").split(".").map(Number);
-  const av = parse(a);
-  const bv = parse(b);
-  for (let i = 0; i < Math.max(av.length, bv.length, 3); i++) {
-    const an = av[i] || 0;
-    const bn = bv[i] || 0;
-    if (an !== bn) return an > bn;
-  }
-  return false;
-}
-
-export async function checkForUpdate(): Promise<string | null> {
-  try {
-    const currentVersion = getCurrentVersion();
-    const repoUrl = getPackageRepoUrl();
-    if (!repoUrl) return null;
-
-    const gitUrl = repoUrl.replace(/^https?:\/\//, "").replace(/\.git$/, "");
-
-    const result = cp.execSync(`git ls-remote --tags https://${gitUrl}`, {
-      timeout: VERSION_CHECK_TIMEOUT_MS,
-      encoding: "utf8",
-      stdio: ["ignore", "pipe", "ignore"],
-    });
-
-    let latestVersion = currentVersion;
-    const tagRe = /refs\/tags\/(v?\d+\.\d+\.\d+)$/m;
-    for (const line of result.trim().split("\n")) {
-      if (!line) continue;
-      const match = line.match(tagRe);
-      if (!match) continue;
-      const tag = match[1];
-      if (isSemverNewer(tag, latestVersion)) {
-        latestVersion = tag;
-      }
-    }
-
-    return latestVersion !== currentVersion ? latestVersion : null;
-  } catch {
-    return null;
-  }
-}
-
-export function getCurrentVersionPublic(): string {
-  return getCurrentVersion();
-}
-
-export function getPackageRepoUrlPublic(): string | null {
-  return getPackageRepoUrl();
 }
 
 // ── API fetch ────────────────────────────────────────────────────────

@@ -5,7 +5,13 @@ Plane.so todo, Sentry issue, and Autotask time integration for [pi](https://pi.d
 ## Install
 
 ```bash
-pi install git:github.com/WaldoJoubert-GH/pi-todos@v1.2.7
+pi install git:github.com/WaldoJoubert-GH/pi-todos@main
+```
+
+Updates via pi's built-in package management:
+
+```bash
+pi update --extensions
 ```
 
 ## What you get
@@ -21,7 +27,7 @@ pi install git:github.com/WaldoJoubert-GH/pi-todos@v1.2.7
 
 ### Widget
 
-Always-visible status bar showing Plane issue counts per state (in Plane's colors), Sentry count, Running Entry timer, and update notifications. Uses Nerd Font icons.
+Always-visible status bar showing Plane issue counts per state (in Plane's colors), Sentry count, Running Entry timer, daily total hours, and GitHub Actions CI status. Uses Nerd Font icons.
 
 ### LLM tools
 

@@ -27,9 +27,6 @@ import {
   getAccumulatedMs,
   startTimeEntry,
   stopRunningEntry,
-  checkForUpdate,
-  getCurrentVersionPublic,
-  getPackageRepoUrlPublic,
   formatPlaneForTool,
   formatDuration,
   formatTimestamp,
@@ -84,7 +81,6 @@ let overlayHandle: { close: () => void } | null = null;
 let timeEntryState: TimeEntry[] = [];
 let widgetTimerInterval: ReturnType<typeof setInterval> | null = null;
 let lastPlaneCache: PlaneCache | null = null;
-let updateAvailableVersion: string | null = null;
 let autotaskTotalHours: number | null = null;
 let autotaskSyncTimer: ReturnType<typeof setInterval> | null = null;
 let autotaskConfigForSync: ResolvedAutotaskConfig | null = null;
@@ -161,8 +157,6 @@ function refreshWidget(ctx: {
       sentryCount,
       running,
       missing,
-      updateAvailableVersion,
-      getPackageRepoUrlPublic(),
       dailyTotalMs,
       widgetProjectIdentifier,
       ghWidgetStatus,
@@ -848,23 +842,6 @@ export default function (pi: ExtensionAPI) {
       // No plane config — just show what we have
       refreshWidget(ctx);
     }
-
-    // Check for updates
-    checkForUpdate().then((newVersion) => {
-      if (newVersion) {
-        updateAvailableVersion = newVersion;
-        const current = getCurrentVersionPublic();
-        const repoUrl = getPackageRepoUrlPublic();
-        const installCmd = repoUrl
-          ? `pi install ${repoUrl}@${newVersion}`
-          : `pi install git:github.com/WaldoJoubert-GH/pi-todos@${newVersion}`;
-        ctx.ui.notify(
-          `pi-todos ${newVersion} available (current: ${current}). Run: ${installCmd}`,
-          "info",
-        );
-        refreshWidget(ctx);
-      }
-    });
 
     // ── initialize autotask sync ────────────────────────────────
     const atCfg = resolveAutotaskConfig(ctx.cwd);

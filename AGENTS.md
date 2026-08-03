@@ -10,7 +10,7 @@ extensions/
   src/
     types.ts        ← shared types and interfaces
     config.ts       ← setup, migration, dev config, secrets resolution
-    plane.ts        ← Plane API client (sync, states, time entries, version check)
+    plane.ts        ← Plane API client (sync, states, time entries)
     sentry.ts       ← Sentry API client (pull, detail fetch)
     autotask.ts     ← Autotask API client (time records, dashboard)
     tui.ts          ← TUI overlay components (UnifiedOverlay, TimesOverlay, widget)
@@ -27,7 +27,7 @@ All domain terms live in [`CONTEXT.md`](CONTEXT.md) — Plane States, Sentry Iss
 ## Key decisions
 
 - **Time entries are local-only** ([ADR 0001](docs/adr/0001-local-time-entries.md)). No sync to Plane — the timer must work without network.
-- **Self-contained version check** ([ADR 0002](docs/adr/0002-self-contained-version-check.md)). Uses `git ls-remote` against this repo, not pi core.
+- **Pi-managed updates** ([ADR 0002](docs/adr/0002-self-contained-version-check.md)). Installed via `@main` and updated through `pi update --extensions`. No custom version check.
 - **Unified extension** ([ADR 0003](docs/adr/0003-unified-extension-with-sentry.md)). One extension, one `.dev/`, one `issues.json`, one overlay. `/todos` is a backward-compat alias for `/issues`.
 
 ## Dev
@@ -54,7 +54,7 @@ pi -e ./extensions/index.ts
 
 ## Widget
 
-The always-visible status bar shows Plane issue counts per state (with Plane's colors), a Sentry count, Running Entry timer, and update notifications. Uses Nerd Font codepoints from the Private Use Area.
+The always-visible status bar shows Plane issue counts per state (with Plane's colors), a Sentry count, Running Entry timer, daily total hours, and GitHub Actions CI status. Uses Nerd Font codepoints from the Private Use Area.
 
 ## Time tracking
 

@@ -129,8 +129,6 @@ export function buildWidgetLines(
   sentryCount: number,
   runningEntry: TimeEntry | null,
   missingIssue: boolean,
-  updateVersion: string | null,
-  repoUrl: string | null,
   dailyTotalMs: number,
   projectIdentifier: string | null = null,
   ghStatus: GitHubWidgetStatus | null = null,
@@ -239,16 +237,6 @@ export function buildWidgetLines(
     );
     lines.push(
       `${prefix}#${runningEntry.sequence_id} ${title} \u2014 ${elapsed}`,
-    );
-  }
-
-  // Update available line
-  if (updateVersion) {
-    const installCmd = repoUrl
-      ? `pi install ${repoUrl}@${updateVersion}`
-      : `pi install git:github.com/WaldoJoubert-GH/pi-todos@${updateVersion}`;
-    lines.push(
-      `\uF019 pi-todos ${updateVersion} available \u2014 ${installCmd}`,
     );
   }
 

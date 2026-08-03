@@ -55,7 +55,7 @@ A Plane issue priority level: `urgent`, `high`, `medium`, `low`, or `none`. Rend
 _Avoid_: Severity, importance
 
 **Widget**:
-The always-visible status bar showing issue counts per State with their Plane colors, the Daily Total, and the Running Entry when one is active. Uses Nerd Font icons: `` (nf-fa-tasks) for Plane count, `` (nf-fa-bug) for Sentry count, `` (nf-fa-clock-o) for Daily Total, `` (nf-fa-check_circle) for zero-state, `` (nf-fa-exclamation_triangle) for sync errors, `` (nf-fa-clock_o) for the Running Entry timer, and `` (nf-fa-download) for update notifications.
+The always-visible status bar showing issue counts per State with their Plane colors, the Daily Total, the Running Entry when one is active, and GitHub Actions CI status. Uses Nerd Font icons: `` (nf-fa-tasks) for Plane count, `` (nf-fa-bug) for Sentry count, `` (nf-fa-clock-o) for Daily Total, `` (nf-fa-check_circle) for zero-state, `` (nf-fa-exclamation_triangle) for sync errors, `` (nf-fa-clock_o) for the Running Entry timer, and `` (nf-fa-github) / `` (nf-fa-check) / `` (nf-fa-times) for CI status.
 _Avoid_: Status bar, pill bar
 
 **Time Entry**:
@@ -87,7 +87,7 @@ The interactive TUI layer opened by `/issues` (or `/todos` as an alias) with a u
 _Avoid_: Popup, modal
 
 **Nerd Font**:
-All TUI icons use Nerd Font (FiraCode Nerd Font) codepoints from the Private Use Area. There is no fallback to vanilla Unicode — a Nerd Font-patched monospace font is required. Icons used include `` (nf-fa-tasks for Plane items), `` (nf-fa-bug for Sentry items), `` (nf-fa-exclamation_triangle for warnings), `` (nf-fa-clock_o for Running Entry timer), `` (nf-fa-clock-o for Daily Total), `` (nf-fa-download for updates), `` (nf-fa-check_circle for zero-state), `` (nf-fa-edit), `` (nf-fa-list_ol), `` (nf-fa-history), `` (nf-fa-exchange), and `` `` `` (chevron/angle navigation arrows).
+All TUI icons use Nerd Font (FiraCode Nerd Font) codepoints from the Private Use Area. There is no fallback to vanilla Unicode — a Nerd Font-patched monospace font is required. Icons used include `` (nf-fa-tasks for Plane items), `` (nf-fa-bug for Sentry items), `` (nf-fa-exclamation_triangle for warnings), `` (nf-fa-clock_o for Running Entry timer), `` (nf-fa-clock-o for Daily Total), `` (nf-fa-check_circle for zero-state), `` (nf-fa-edit), `` (nf-fa-list_ol), `` (nf-fa-history), `` (nf-fa-exchange), `` (nf-fa-github for CI status), and `` `` `` (chevron/angle navigation arrows).
 _Avoid_: Unicode icons, ASCII fallback
 
 **Create**:
