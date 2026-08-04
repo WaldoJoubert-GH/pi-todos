@@ -35,6 +35,7 @@ import {
   loadStatesCache,
   resolveDefaultStateId,
   createIssue,
+  ACTIVE_GROUPS,
 } from "./src/plane.js";
 import {
   ensureSentrySetup,
@@ -274,12 +275,15 @@ async function handleChangeState(
       }
       lastPlaneCache.states[newState.name].count++;
 
-      // If moved to completed/cancelled, remove from active list
-      const EXCLUDED = new Set(["completed", "cancelled"]);
-      if (EXCLUDED.has(newGroup)) {
-        lastPlaneCache.issues.splice(ci, 1);
-        lastPlaneCache.total_active = lastPlaneCache.issues.length;
-      }
+      // Issue stays in the list — the overlay's state-group filter
+      // (←/→) controls visibility. Completed/cancelled are excluded
+      // from the default "All" (active-only) view but visible when
+      // the user cycles to those groups.
+
+      // Recalculate total_active after state change
+      lastPlaneCache.total_active = lastPlaneCache.issues.filter(
+        (i) => (i.state_group ? ACTIVE_GROUPS.has(i.state_group) : true),
+      ).length;
     }
   }
 

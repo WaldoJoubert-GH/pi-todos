@@ -35,7 +35,6 @@ const SECRETS_FILE = path.join(
   "plane.json",
 );
 export const SYNC_INTERVAL_MS = 5 * 60 * 1000;
-const EXCLUDED_GROUPS = new Set(["completed", "cancelled"]);
 export const GROUP_ORDER = [
   "backlog",
   "unstarted",
@@ -43,6 +42,14 @@ export const GROUP_ORDER = [
   "triage",
   "cancelled",
 ];
+
+/** State groups considered "active" — used by widget and default overlay filter. */
+export const ACTIVE_GROUPS = new Set([
+  "backlog",
+  "unstarted",
+  "started",
+  "triage",
+]);
 
 // ── priority maps ────────────────────────────────────────────────────
 
@@ -312,11 +319,6 @@ export async function buildPlaneCache(
   }
 
   const all = issuesResult.data.results ?? [];
-  const active = all.filter((issue) => {
-    const stateObj = issue.state ? stateMap.get(issue.state) : undefined;
-    if (!stateObj) return true;
-    return !EXCLUDED_GROUPS.has(stateObj.group);
-  });
 
   const statesAcc: Record<
     string,
@@ -324,7 +326,7 @@ export async function buildPlaneCache(
   > = {};
 
   const now = new Date().toISOString();
-  const issues: UnifiedIssue[] = active.map((issue) => {
+  const issues: UnifiedIssue[] = all.map((issue) => {
     const stateObj = issue.state ? stateMap.get(issue.state) : undefined;
     const group = stateObj?.group ?? "unknown";
     const stateName = stateObj?.name ?? "Unknown";
@@ -382,7 +384,9 @@ export async function buildPlaneCache(
     project_id: config.project_id,
     issues,
     states: statesAcc,
-    total_active: issues.length,
+    total_active: issues.filter((i) =>
+      i.state_group ? ACTIVE_GROUPS.has(i.state_group) : true,
+    ).length,
   };
 
   // Build state items from the fetched state map

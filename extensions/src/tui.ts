@@ -43,11 +43,32 @@ import * as path from "node:path";
 
 export type IssueFilter = "all" | "plane" | "sentry";
 
+export type StateGroupFilter = "all" | "backlog" | "unstarted" | "started" | "triage" | "completed" | "cancelled";
+
 const FILTER_CYCLE: IssueFilter[] = ["all", "plane", "sentry"];
 const FILTER_LABELS: Record<IssueFilter, string> = {
   all: "All",
   plane: "\uF273 Plane",
   sentry: "\uF188 Sentry",
+};
+
+const STATE_GROUP_CYCLE: StateGroupFilter[] = [
+  "all",
+  "backlog",
+  "unstarted",
+  "started",
+  "triage",
+  "completed",
+  "cancelled",
+];
+const STATE_GROUP_LABELS: Record<StateGroupFilter, string> = {
+  all: "All",
+  backlog: "Backlog",
+  unstarted: "Unstarted",
+  started: "Started",
+  triage: "Triage",
+  completed: "Completed",
+  cancelled: "Cancelled",
 };
 
 // ── sentry level colors ──────────────────────────────────────────────
@@ -184,8 +205,10 @@ export function buildWidgetLines(
     );
 
     const pillParts: string[] = [];
-    for (const [name, { count, color }] of entries) {
+    for (const [name, { count, color, group }] of entries) {
       if (count === 0) continue;
+      // Widget stays active-only — skip completed/cancelled
+      if (group === "completed" || group === "cancelled") continue;
       pillParts.push(
         statePill(color, `${abbreviateState(name)}: ${count}`),
       );
@@ -307,6 +330,7 @@ export class UnifiedOverlay {
   private allIssues: UnifiedIssue[];
   private filteredIssues: UnifiedIssue[] = [];
   private filter: IssueFilter = "all";
+  private stateGroupFilter: StateGroupFilter = "all";
   private selected = 0;
   private scrollOffset = 0;
   private visibleHeight = 0;
@@ -430,18 +454,42 @@ export class UnifiedOverlay {
   }
 
   private applyFilter(): void {
-    if (this.filter === "all") {
-      this.filteredIssues = [...this.allIssues];
-    } else {
-      this.filteredIssues = this.allIssues.filter(
-        (i) => i.source === this.filter,
-      );
+    let issues = this.allIssues;
+
+    // Source filter
+    if (this.filter !== "all") {
+      issues = issues.filter((i) => i.source === this.filter);
     }
+
+    // State-group filter (Plane only; Sentry always passes)
+    if (this.stateGroupFilter !== "all") {
+      issues = issues.filter((i) => {
+        if (i.source === "sentry") return true;
+        return i.state_group === this.stateGroupFilter;
+      });
+    } else {
+      // "All" = active groups only (backlog, unstarted, started, triage)
+      issues = issues.filter((i) => {
+        if (i.source === "sentry") return true;
+        return i.state_group ? ACTIVE_GROUPS.has(i.state_group) : true;
+      });
+    }
+
+    this.filteredIssues = issues;
     this.selected = 0;
     this.scrollOffset = 0;
     this.detailIssue = null;
     this.detailScroll = 0;
     this.invalidate();
+  }
+
+  private cycleStateGroupFilter(delta: 1 | -1): void {
+    const idx = STATE_GROUP_CYCLE.indexOf(this.stateGroupFilter);
+    this.stateGroupFilter =
+      STATE_GROUP_CYCLE[
+        (idx + delta + STATE_GROUP_CYCLE.length) % STATE_GROUP_CYCLE.length
+      ];
+    this.applyFilter();
   }
 
   /** Set the current filter and re-apply. Used externally after issue creation. */
@@ -611,6 +659,16 @@ export class UnifiedOverlay {
       return;
     }
 
+    // ← → cycle state-group filter
+    if (matchesKey(data, Key.left)) {
+      this.cycleStateGroupFilter(-1);
+      return;
+    }
+    if (matchesKey(data, Key.right)) {
+      this.cycleStateGroupFilter(1);
+      return;
+    }
+
     // Detail view keys
     if (this.detailIssue !== null) {
       if (matchesKey(data, Key.escape)) {
@@ -722,7 +780,7 @@ export class UnifiedOverlay {
     const sentryCount = this.allIssues.filter(
       (i) => i.source === "sentry",
     ).length;
-    const title = `Issues (${this.filteredIssues.length}) [${FILTER_LABELS[this.filter]}] `;
+    const title = `Issues (${this.filteredIssues.length}) [${FILTER_LABELS[this.filter]} \u00B7 ${STATE_GROUP_LABELS[this.stateGroupFilter]}] `;
     const topDash = Math.max(0, innerW - visibleWidth(title) - 3);
     lines.push(
       B("\u250C\u2500 ") +
@@ -904,7 +962,7 @@ export class UnifiedOverlay {
 
     // ── footer ───────────────────────────────────────────────────
     const footerLines = wrapText(
-      "\uF102 \uF103 scroll  n new issue  Enter preview  s start/stop (Plane)  d change state (Plane)  f filter  Ctrl+Enter open  c copy  Esc close",
+      "\uF102 \uF103 scroll  n new issue  Enter preview  s start/stop (Plane)  d change state (Plane)  f source  \u2190\u2192 group  Ctrl+Enter open  c copy  Esc close",
       innerW,
     );
     for (const fl of footerLines) {
