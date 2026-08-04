@@ -5,7 +5,7 @@ Plane.so todo, Sentry issue, and Autotask time integration for [pi](https://pi.d
 ## Install
 
 ```bash
-pi install git:github.com/WaldoJoubert-GH/pi-todos@main
+pi install git:github.com/WaldoJoubert-GH/pi-todos@master
 ```
 
 Updates via pi's built-in package management:
