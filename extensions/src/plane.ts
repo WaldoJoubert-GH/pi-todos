@@ -355,6 +355,8 @@ export async function buildPlaneCache(
       state_group: group,
       state_hex: stateHex,
       priority,
+      start_date: issue.start_date ?? undefined,
+      target_date: issue.target_date ?? undefined,
       link,
       updated_at: now,
     };

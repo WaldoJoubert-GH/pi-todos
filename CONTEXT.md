@@ -7,12 +7,20 @@ Plane.so todo and Sentry issue integration for pi — unified under a shared `.d
 ### Plane
 
 **Issue**:
-A Plane.so work item with a unique ID, sequence number, title, description, state, and priority.
+A Plane.so work item with a unique ID, sequence number, title, description, state, priority, start date, and target date.
 _Avoid_: Ticket, task, item
 
 **State**:
 A Plane workspace-defined status label for an Issue (e.g., "In Progress", "Review", "Done"). Each State has a name, a hex color, and belongs to a State Group.
 _Avoid_: Status
+
+**Start Date**:
+The date work on an Issue is scheduled to begin, in `YYYY-MM-DD` format. Optional — an Issue may have only a Target Date or neither date. Stored on the UnifiedIssue as `start_date`.
+_Avoid_: Begin date, kickoff date
+
+**Target Date**:
+The date an Issue is targeted for completion, in `YYYY-MM-DD` format. Optional — an Issue may have only a Start Date or neither date. Stored on the UnifiedIssue as `target_date`. Corresponds to Plane's `target_date` field (the documented `due_date` name in the create endpoint is an alias — the API returns `target_date`).
+_Avoid_: Due date, end date, deadline (all plausible; use "Target Date" for consistency with the Plane API schema)
 
 **State Group**:
 A Plane system-level classification of States: `backlog`, `unstarted`, `started`, `completed`, `cancelled`, `triage`.
@@ -101,6 +109,26 @@ _Avoid_: New todo, new ticket, new item
 **Create-issue Input Mode**:
 The inline text input state entered by pressing `n` in the overlay (from either list or detail view). Printable characters populate the input buffer, Backspace deletes, Enter submits (non-empty buffer), and Escape cancels. Empty titles are treated the same as Escape.
 _Avoid_: Input mode, title input, new issue prompt
+
+**Gantt View**:
+The horizontal bar-chart timeline view within the `/issues` overlay, toggled by pressing `g`. Shows Plane Issues as bars spanning from their Start Date to Target Date along a day-level timeline. Only issues with at least one of `start_date` or `target_date` appear. Pressing `g` or `Esc` returns to the list view. All commands from the list view (`s` for timer, `d` for detail, `↑`/`↓` for row selection) carry over unchanged.
+_Avoid_: Timeline view, roadmap, chart view
+
+**Gantt Bar**:
+The horizontal bar rendered for a single Issue in the Gantt View. Spans from the Issue's Start Date column to its Target Date column, filled with the Issue's State Hex. When only one date is set, the bar renders as a single-column marker at that date. The bar on the selected row gets a brighter border; all non-selected bars render at normal weight.
+_Avoid_: Issue bar, timeline block, date span
+
+**Gantt Header**:
+The two-line column header above the Gantt View. Top line: month-year labels spanning their day ranges (e.g., "April 2025" centred over April's columns). Bottom line: abbreviated day-of-month or `Mon 7`-style labels for each column. Uses dimmed foreground for weekends.
+_Avoid_: Timeline header, date header
+
+**Today Line**:
+A vertical line drawn at today's column in the Gantt View, spanning the full height of the chart. Rendered in a neutral/dim color. Makes the current date instantly scannable against all bars.
+_Avoid_: Now line, current-date marker
+
+**Time Window**:
+The visible date range of the Gantt View. Defaults to 4 weeks starting from today. `←` and `→` scroll the window by 1 week backward or forward. `t` snaps the window back to today.
+_Avoid_: Viewport, date range, scroll window
 
 ### Sentry
 

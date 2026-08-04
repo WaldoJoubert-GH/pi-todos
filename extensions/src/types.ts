@@ -19,6 +19,8 @@ export interface UnifiedIssue {
   state_group?: string;
   state_hex?: string;
   priority?: string;
+  start_date?: string;
+  target_date?: string;
 
   // Sentry-specific
   sentry_id?: string;
@@ -79,6 +81,8 @@ export interface RawPlaneIssue {
   state: string;
   assignees: string[];
   priority: string;
+  start_date: string | null;
+  target_date: string | null;
   completed_at: string | null;
   created_at: string;
   project: string;

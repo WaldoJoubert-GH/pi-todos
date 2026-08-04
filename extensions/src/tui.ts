@@ -370,6 +370,10 @@ export class UnifiedOverlay {
   private inputBuffer = "";
   private onCreate: ((title: string) => Promise<boolean>) | null = null;
 
+  // Gantt mode
+  private ganttMode = false;
+  private ganttWeekOffset = 0;
+
   /** Set by the TUI factory to trigger re-renders from async callbacks. */
   requestRender: (() => void) | null = null;
 
@@ -425,11 +429,12 @@ export class UnifiedOverlay {
     const isBulk = this.selectedSet.size > 0 && this.detailIssue === null;
 
     // In bulk mode, pick the first selected issue as the reference for pre-selection
+    const list = this.ganttMode ? this.ganttIssues() : this.filteredIssues;
     const issue = isBulk
       ? this.allIssues.find(
           (i) => i.source === "plane" && i.id != null && this.selectedSet.has(i.id),
         ) ?? null
-      : (this.detailIssue ?? this.filteredIssues[this.selected]);
+      : (this.detailIssue ?? list[this.selected]);
 
     if (!issue || issue.source !== "plane") return;
 
@@ -634,6 +639,7 @@ export class UnifiedOverlay {
     // In list view: bulk-change all selected if any, otherwise single issue.
     // In detail view: always single-issue, ignoring bulk selection.
     if (matchesKey(data, "d")) {
+      const list = this.ganttMode ? this.ganttIssues() : this.filteredIssues;
       if (this.detailIssue !== null) {
         if (this.detailIssue.source === "plane") {
           this.openDropdown();
@@ -643,7 +649,7 @@ export class UnifiedOverlay {
       if (this.selectedSet.size > 0) {
         this.openDropdown();
       } else {
-        const issue = this.filteredIssues[this.selected];
+        const issue = list[this.selected];
         if (issue && issue.source === "plane") {
           this.openDropdown();
         }
@@ -673,31 +679,62 @@ export class UnifiedOverlay {
       return;
     }
 
+    // g → toggle Gantt view
+    if (matchesKey(data, "g")) {
+      this.ganttMode = !this.ganttMode;
+      this.ganttWeekOffset = 0;
+      this.detailIssue = null;
+      this.detailScroll = 0;
+      this.invalidate();
+      return;
+    }
+
     // s → toggle time (plane only)
     if (matchesKey(data, "s")) {
-      const issue = this.detailIssue ?? this.filteredIssues[this.selected];
-      if (issue && issue.source === "plane") {
-        this.onToggleTime(issue);
+      // In Gantt mode, use gantt-selected issue; otherwise list/detail
+      if (this.ganttMode) {
+        const ganttIssues = this.ganttIssues();
+        const issue = ganttIssues[this.selected];
+        if (issue && issue.source === "plane") {
+          this.onToggleTime(issue);
+        }
+      } else {
+        const issue = this.detailIssue ?? this.filteredIssues[this.selected];
+        if (issue && issue.source === "plane") {
+          this.onToggleTime(issue);
+        }
       }
       return;
     }
 
-    // f → cycle filter
+    // f → cycle filter (disabled in Gantt mode)
     if (matchesKey(data, "f")) {
-      const idx = FILTER_CYCLE.indexOf(this.filter);
-      this.filter = FILTER_CYCLE[(idx + 1) % FILTER_CYCLE.length];
-      this.applyFilter();
-      if (this.onFilterChange) this.onFilterChange();
+      if (!this.ganttMode) {
+        const idx = FILTER_CYCLE.indexOf(this.filter);
+        this.filter = FILTER_CYCLE[(idx + 1) % FILTER_CYCLE.length];
+        this.applyFilter();
+        if (this.onFilterChange) this.onFilterChange();
+      }
       return;
     }
 
-    // ← → cycle state-group filter
+    // ← → cycle state-group filter (or scroll Gantt window)
     if (matchesKey(data, Key.left)) {
-      this.cycleStateGroupFilter(-1);
+      if (this.ganttMode) {
+        this.ganttWeekOffset--;
+        this.invalidate();
+      } else {
+        this.cycleStateGroupFilter(-1);
+      }
       return;
     }
     if (matchesKey(data, Key.right)) {
-      this.cycleStateGroupFilter(1);
+      if (this.ganttMode) {
+        this.ganttWeekOffset++;
+        this.invalidate();
+      } else {
+        this.cycleStateGroupFilter(1);
+      }
       return;
     }
 
@@ -718,6 +755,50 @@ export class UnifiedOverlay {
         this.detailScroll = Math.max(0, this.detailScroll - 1);
       } else if (matchesKey(data, Key.home)) {
         this.detailScroll = 0;
+      }
+      return;
+    }
+
+    // Gantt-mode list navigation (handled before regular list keys)
+    if (this.ganttMode) {
+      const ganttIssues = this.ganttIssues();
+      if (matchesKey(data, Key.enter)) {
+        const issue = ganttIssues[this.selected];
+        if (issue) {
+          this.detailIssue = issue;
+          this.detailScroll = 0;
+        }
+        return;
+      }
+      if (matchesKey(data, "t")) {
+        this.ganttWeekOffset = 0;
+        this.invalidate();
+        return;
+      }
+      if (matchesKey(data, Key.up)) {
+        if (this.selected > 0) {
+          this.selected--;
+          this.ensureGanttVisible();
+          this.invalidate();
+        }
+        return;
+      }
+      if (matchesKey(data, Key.down)) {
+        if (this.selected < ganttIssues.length - 1) {
+          this.selected++;
+          this.ensureGanttVisible();
+          this.invalidate();
+        }
+        return;
+      }
+      if (matchesKey(data, Key.escape)) {
+        if (this.ganttMode) {
+          this.ganttMode = false;
+          this.invalidate();
+        } else {
+          this.onClose();
+        }
+        return;
       }
       return;
     }
@@ -793,6 +874,20 @@ export class UnifiedOverlay {
       return this.cachedLines;
     }
 
+    if (this.detailIssue) {
+      const detailLines = this.renderDetailMode(width);
+      this.cachedWidth = width;
+      this.cachedLines = detailLines;
+      return detailLines;
+    }
+
+    if (this.ganttMode) {
+      const ganttLines = this.renderGantt(width);
+      this.cachedWidth = width;
+      this.cachedLines = ganttLines;
+      return ganttLines;
+    }
+
     if (this.dropdownOpen) {
       const dropdownLines = this.renderDropdown(width);
       this.cachedWidth = width;
@@ -805,13 +900,6 @@ export class UnifiedOverlay {
       this.cachedWidth = width;
       this.cachedLines = inputLines;
       return inputLines;
-    }
-
-    if (this.detailIssue) {
-      const detailLines = this.renderDetailMode(width);
-      this.cachedWidth = width;
-      this.cachedLines = detailLines;
-      return detailLines;
     }
 
     const lines: string[] = [];
@@ -898,7 +986,7 @@ export class UnifiedOverlay {
 
     // ── issue rows ───────────────────────────────────────────────
     const maxVisible = Math.min(
-      25,
+      50,
       Math.max(5, Math.floor(innerW * 0.5)),
     );
     this.visibleHeight = maxVisible;
@@ -1025,7 +1113,7 @@ export class UnifiedOverlay {
 
     // ── footer ───────────────────────────────────────────────────
     const footerLines = wrapText(
-      "\uF102 \uF103 scroll  n new issue  Enter preview  Space select  s start/stop (Plane)  d change state (Plane)  f source  \u2190\u2192 group  Ctrl+Enter open  c copy  Esc close",
+      "\uF102 \uF103 scroll  n new issue  Enter preview  Space select  s start/stop  d change state  g Gantt  f source  \u2190\u2192 group  Ctrl+Enter open  c copy  Esc close",
       innerW,
     );
     for (const fl of footerLines) {
@@ -1226,7 +1314,11 @@ export class UnifiedOverlay {
         accMs > 0
           ? `  ${t.fg("muted", "\u00B7 Total:")} ${formatDuration(accMs)}`
           : "";
-      const meta = `${coloredState}  ${t.fg("muted", "\u00B7 Priority: ")}${coloredPriority}${accStr}`;
+      const dateStr =
+        issue.start_date || issue.target_date
+          ? `  ${t.fg("muted", "\u00B7")} ${issue.start_date ?? "?"} \u2192 ${issue.target_date ?? "?"}`
+          : "";
+      const meta = `${coloredState}  ${t.fg("muted", "\u00B7 Priority: ")}${coloredPriority}${accStr}${dateStr}`;
       const metaPad = Math.max(
         0,
         innerW - visibleWidth(meta),
@@ -1468,7 +1560,7 @@ export class UnifiedOverlay {
       1 + titleLines.length + 1 + 1 + 1 + 1 + 1;
     const viewH =
       this.visibleHeight ||
-      Math.min(25, Math.max(5, Math.floor(width * 0.5)));
+      Math.min(50, Math.max(5, Math.floor(width * 0.5)));
     const availContentH = Math.max(3, viewH - chromeRows);
 
     const maxScroll = Math.max(
@@ -1510,7 +1602,7 @@ export class UnifiedOverlay {
 
     // ── footer ───────────────────────────────────────────────────
     const footerLines = wrapText(
-      "Esc back  n new issue  \uF102 \uF103 scroll  d change state (Plane)  Ctrl+Enter open  c copy",
+      "Esc back  n new issue  \uF102 \uF103 scroll  d change state  g Gantt  Ctrl+Enter open  c copy",
       innerW,
     );
     for (const fl of footerLines) {
@@ -1528,6 +1620,396 @@ export class UnifiedOverlay {
   invalidate(): void {
     this.cachedWidth = undefined;
     this.cachedLines = undefined;
+  }
+
+  // ── Gantt helpers ─────────────────────────────────────────────────
+
+  private ganttIssues(): UnifiedIssue[] {
+    let issues = this.allIssues;
+
+    // State-group filter applies (same as list view)
+    if (this.stateGroupFilter !== "all") {
+      issues = issues.filter((i) => {
+        if (i.source === "sentry") return false; // never show sentry in Gantt
+        return i.state_group === this.stateGroupFilter;
+      });
+    } else {
+      issues = issues.filter((i) => {
+        if (i.source === "sentry") return false;
+        return i.state_group ? ACTIVE_GROUPS.has(i.state_group) : true;
+      });
+    }
+
+    // Only issues with at least one date
+    issues = issues.filter((i) => i.start_date || i.target_date);
+
+    // Sort: priority → state group → title
+    const PRIORITY_ORDER: Record<string, number> = {
+      urgent: 0,
+      high: 1,
+      medium: 2,
+      low: 3,
+      none: 4,
+    };
+    const GROUP_SORT: Record<string, number> = {
+      backlog: 0,
+      unstarted: 1,
+      started: 2,
+      triage: 3,
+      completed: 4,
+      cancelled: 5,
+    };
+    issues.sort((a, b) => {
+      const pA = PRIORITY_ORDER[a.priority ?? "none"] ?? 99;
+      const pB = PRIORITY_ORDER[b.priority ?? "none"] ?? 99;
+      if (pA !== pB) return pA - pB;
+      const gA = GROUP_SORT[a.state_group ?? ""] ?? 99;
+      const gB = GROUP_SORT[b.state_group ?? ""] ?? 99;
+      if (gA !== gB) return gA - gB;
+      return (a.title || "").localeCompare(b.title || "");
+    });
+
+    return issues;
+  }
+
+  private ensureGanttVisible(): void {
+    if (this.selected < this.scrollOffset) {
+      this.scrollOffset = this.selected;
+    } else if (
+      this.selected >=
+      this.scrollOffset + this.visibleHeight
+    ) {
+      this.scrollOffset = this.selected - this.visibleHeight + 1;
+    }
+  }
+
+  // ── Gantt render ──────────────────────────────────────────────────
+
+  private renderGantt(width: number): string[] {
+    const t = this.theme;
+    const B = (s: string) => t.fg("border", s);
+    const innerW = Math.max(1, width - 2);
+    const lines: string[] = [];
+
+    const ganttIssues = this.ganttIssues();
+
+    // ── Compute time window ─────────────────────────────────────
+    const today = new Date();
+    const todayMidnight = new Date(
+      today.getFullYear(),
+      today.getMonth(),
+      today.getDate(),
+    );
+    const windowStart = new Date(todayMidnight);
+    windowStart.setDate(windowStart.getDate() + this.ganttWeekOffset * 7);
+    const DAYS_IN_WINDOW = 28;
+
+    // ── Layout ──────────────────────────────────────────────────
+    const labelW = 14; // left gutter for slug
+    const dayColW = Math.max(
+      1,
+      Math.floor((innerW - labelW) / DAYS_IN_WINDOW),
+    );
+    const timelineW = dayColW * DAYS_IN_WINDOW;
+    const maxVisible = Math.min(
+      50,
+      Math.max(5, Math.floor(innerW * 0.5)),
+    );
+    this.visibleHeight = maxVisible;
+
+    // ── top border ───────────────────────────────────────────────
+    const title = `Gantt (${ganttIssues.length} issues) `;
+    const topDash = Math.max(0, innerW - visibleWidth(title) - 3);
+    lines.push(
+      B("\u250C\u2500 ") +
+        t.fg("accent", title) +
+        B(" " + "\u2500".repeat(topDash) + "\u2510"),
+    );
+
+    // ── header: month labels ─────────────────────────────────────
+    const headerLine1Parts: string[] = [];
+    const headerLine2Parts: string[] = [];
+    const dayNames = ["Su", "Mo", "Tu", "We", "Th", "Fr", "Sa"];
+
+    // Build month-spanning labels for line 1
+    let currentMonth = -1;
+    let monthSpanStart = 0;
+    for (let d = 0; d < DAYS_IN_WINDOW; d++) {
+      const date = new Date(windowStart);
+      date.setDate(date.getDate() + d);
+      const month = date.getMonth();
+      if (month !== currentMonth) {
+        if (currentMonth >= 0) {
+          const spanDays = d - monthSpanStart;
+          const spanChars = spanDays * dayColW;
+          const monthName = new Date(
+            windowStart.getFullYear(),
+            currentMonth,
+            1,
+          ).toLocaleString("en", { month: "short", year: "numeric" });
+          const padded = monthName.padEnd(spanChars).slice(0, spanChars);
+          headerLine1Parts.push(padded);
+        }
+        currentMonth = month;
+        monthSpanStart = d;
+      }
+    }
+    // Flush last month
+    if (currentMonth >= 0) {
+      const spanDays = DAYS_IN_WINDOW - monthSpanStart;
+      const spanChars = spanDays * dayColW;
+      const monthName = new Date(
+        windowStart.getFullYear(),
+        currentMonth,
+        1,
+      ).toLocaleString("en", { month: "short", year: "numeric" });
+      const padded = monthName.padEnd(spanChars).slice(0, spanChars);
+      headerLine1Parts.push(padded);
+    }
+    const headerLine1 = headerLine1Parts.join("");
+
+    // Line 2: day labels
+    for (let d = 0; d < DAYS_IN_WINDOW; d++) {
+      const date = new Date(windowStart);
+      date.setDate(date.getDate() + d);
+      const dayNum = String(date.getDate());
+      const dayAbbr = dayNames[date.getDay()];
+      const label = `${dayAbbr}${dayNum}`;
+      const padded = padOrTrunc(label, dayColW);
+      const isWeekend = date.getDay() === 0 || date.getDay() === 6;
+      headerLine2Parts.push(
+        isWeekend ? t.fg("dim", padded) : t.fg("muted", padded),
+      );
+    }
+    const headerLine2 = headerLine2Parts.join("");
+
+    const gutterSpace = " ".repeat(labelW);
+
+    // Line 1: month labels
+    const hl1Pad = Math.max(0, innerW - labelW - visibleWidth(headerLine1));
+    lines.push(
+      B("\u2502") +
+        gutterSpace +
+        headerLine1 +
+        " ".repeat(hl1Pad) +
+        B("\u2502"),
+    );
+
+    // Line 2: day labels
+    const hl2Pad = Math.max(0, innerW - labelW - visibleWidth(headerLine2));
+    lines.push(
+      B("\u2502") +
+        gutterSpace +
+        headerLine2 +
+        " ".repeat(hl2Pad) +
+        B("\u2502"),
+    );
+
+    // Today line indicator in header
+    const todayCol = this.ganttDateToCol(todayMidnight, windowStart, DAYS_IN_WINDOW);
+    if (todayCol >= 0 && todayCol < DAYS_IN_WINDOW) {
+      const todayMarkerX = labelW + todayCol * dayColW + Math.floor(dayColW / 2);
+      // Render a small "today" label just below the header
+      const tMarker = "\u25BC today";
+      const tMarkerPadBefore = Math.max(0, todayMarkerX - visibleWidth(tMarker));
+      const tMarkerPadAfter = Math.max(
+        0,
+        innerW - todayMarkerX - visibleWidth(tMarker),
+      );
+      lines.push(
+        B("\u2502") +
+          " ".repeat(tMarkerPadBefore) +
+          t.fg("muted", tMarker) +
+          " ".repeat(tMarkerPadAfter) +
+          B("\u2502"),
+      );
+    }
+
+    // ── separator ────────────────────────────────────────────────
+    lines.push(
+      B("\u251C" + "\u2500".repeat(innerW) + "\u2524"),
+    );
+
+    // ── issue rows ───────────────────────────────────────────────
+    const endIdx = Math.min(
+      this.scrollOffset + maxVisible,
+      ganttIssues.length,
+    );
+    const displayIssues = ganttIssues.slice(this.scrollOffset, endIdx);
+
+    for (let i = 0; i < displayIssues.length; i++) {
+      const idx = this.scrollOffset + i;
+      const issue = displayIssues[i];
+      const isSelected = idx === this.selected;
+      const runningId = this.getRunningEntryPlaneId();
+      const isTimed =
+        issue.source === "plane" &&
+        runningId !== null &&
+        issue.id === runningId;
+
+      // Build slug
+      const idStr =
+        issue.sequence_id != null
+          ? this.projectIdentifier
+            ? `${this.projectIdentifier}-${issue.sequence_id}`
+            : `#${issue.sequence_id}`
+          : issue.id?.slice(0, 8) ?? "?";
+      const slug = padOrTrunc(idStr, labelW - 2);
+      const rowPrefix = (isSelected || isTimed) ? `\uF054${slug}` : ` ${slug}`;
+      const rowPrefixVis = visibleWidth(rowPrefix);
+
+      // Build bar
+      const startCol = issue.start_date
+        ? this.ganttDateToCol(issue.start_date, windowStart, DAYS_IN_WINDOW)
+        : null;
+      const endCol = issue.target_date
+        ? this.ganttDateToCol(issue.target_date, windowStart, DAYS_IN_WINDOW)
+        : null;
+
+      // Determine visible start/end columns
+      let barStartCol: number;
+      let barEndCol: number;
+      if (startCol !== null && endCol !== null) {
+        barStartCol = startCol;
+        barEndCol = endCol;
+      } else if (startCol !== null) {
+        barStartCol = startCol;
+        barEndCol = startCol; // 1-column marker
+      } else if (endCol !== null) {
+        barStartCol = endCol;
+        barEndCol = endCol; // 1-column marker
+      } else {
+        barStartCol = -1;
+        barEndCol = -1;
+      }
+
+      // Build the timeline portion for this row
+      let timelineChars = "";
+      for (let d = 0; d < DAYS_IN_WINDOW; d++) {
+        let cellStr = "";
+        const date = new Date(windowStart);
+        date.setDate(date.getDate() + d);
+        const isToday =
+          date.getFullYear() === todayMidnight.getFullYear() &&
+          date.getMonth() === todayMidnight.getMonth() &&
+          date.getDate() === todayMidnight.getDate();
+
+        if (d >= barStartCol && d <= barEndCol) {
+          // Bar cell — fill with State Hex background
+          const fill = " ".repeat(dayColW);
+          const raw = (issue.state_hex ?? "#808080").replace("#", "");
+          const cr = parseInt(raw.slice(0, 2), 16);
+          const cg = parseInt(raw.slice(2, 4), 16);
+          const cb = parseInt(raw.slice(4, 6), 16);
+          if (!isNaN(cr) && !isNaN(cg) && !isNaN(cb)) {
+            cellStr = `\x1b[48;2;${cr};${cg};${cb}m${fill}\x1b[49m`;
+          } else {
+            cellStr = fill;
+          }
+        } else {
+          cellStr = " ".repeat(dayColW);
+        }
+
+        // Overlay today line (vertical bar at today column)
+        if (isToday) {
+          // Replace middle character with dim vertical bar
+          const mid = Math.floor(dayColW / 2);
+          const before = cellStr.slice(0, mid);
+          const after = cellStr.slice(mid + 1);
+          cellStr = before + t.fg("dim", "\u2502") + after;
+        }
+
+        timelineChars += cellStr;
+      }
+
+      // Row assembly
+      const fullRow = rowPrefix + timelineChars;
+      const fullRowVis = visibleWidth(fullRow);
+
+      if (isSelected) {
+        const content = t.bg(
+          "selectedBg",
+          t.fg("text", fullRow),
+        );
+        const padLen = Math.max(0, innerW - fullRowVis);
+        lines.push(
+          B("\u2502") + content + " ".repeat(padLen) + B("\u2502"),
+        );
+      } else {
+        const prefix =
+          isTimed ? t.fg("accent", `\uF054${slug}`) : rowPrefix;
+        const timelineOnly = timelineChars;
+        const rowContent = prefix + timelineOnly;
+        const padLen = Math.max(0, innerW - rowPrefixVis - timelineW);
+        lines.push(
+          B("\u2502") +
+            rowContent +
+            " ".repeat(padLen) +
+            B("\u2502"),
+        );
+      }
+    }
+
+    // ── scroll indicator ─────────────────────────────────────────
+    if (endIdx < ganttIssues.length) {
+      const remaining = ganttIssues.length - endIdx;
+      const indicator = padOrTrunc(
+        `\uF103 ${remaining} more`,
+        innerW,
+      );
+      lines.push(
+        B("\u2502") + t.fg("muted", indicator) + B("\u2502"),
+      );
+    }
+
+    // ── footer separator ─────────────────────────────────────────
+    lines.push(
+      B("\u251C" + "\u2500".repeat(innerW) + "\u2524"),
+    );
+
+    // ── footer ───────────────────────────────────────────────────
+    const weekLabel =
+      this.ganttWeekOffset === 0
+        ? "this week"
+        : this.ganttWeekOffset > 0
+          ? `+${this.ganttWeekOffset}w`
+          : `${this.ganttWeekOffset}w`;
+    const footerLines = wrapText(
+      `\u2190\u2192 scroll week (${weekLabel})  t today  \uF102\uF103 navigate  Enter detail  d state  s timer  g list  Esc close`,
+      innerW,
+    );
+    for (const fl of footerLines) {
+      lines.push(
+        B("\u2502") +
+          t.fg("dim", truncateToWidth(fl, innerW, "", true)) +
+          B("\u2502"),
+      );
+    }
+
+    // ── bottom border ────────────────────────────────────────────
+    lines.push(
+      B("\u2514" + "\u2500".repeat(innerW) + "\u2518"),
+    );
+
+    return lines.map((l) => truncateToWidth(l, width));
+  }
+
+  /** Convert a date (YYYY-MM-DD string or Date) to a column index in the window. Returns -1 if outside. */
+  private ganttDateToCol(
+    date: string | Date,
+    windowStart: Date,
+    daysInWindow: number,
+  ): number {
+    let d: Date;
+    if (typeof date === "string") {
+      d = new Date(date + "T00:00:00");
+    } else {
+      d = new Date(date.getFullYear(), date.getMonth(), date.getDate());
+    }
+    const diffMs = d.getTime() - windowStart.getTime();
+    const col = Math.round(diffMs / (1000 * 60 * 60 * 24));
+    if (col < 0 || col >= daysInWindow) return -1;
+    return col;
   }
 }
 
@@ -1673,7 +2155,7 @@ export class TimesOverlay {
 
     // ── rows ─────────────────────────────────────────────────────
     const maxVisible = Math.min(
-      25,
+      50,
       Math.max(5, Math.floor(innerW * 0.5)),
     );
     this.visibleHeight = maxVisible;
@@ -2146,7 +2628,7 @@ export class ActionsOverlay {
 
     // ── rows ─────────────────────────────────────────────────────
     const maxVisible = Math.min(
-      25,
+      50,
       Math.max(5, Math.floor(innerW * 0.5)),
     );
     this.visibleHeight = maxVisible;
