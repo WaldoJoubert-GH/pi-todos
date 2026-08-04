@@ -2985,3 +2985,181 @@ function getJobErrorHint(job: GitHubJob): string {
   }
   return "";
 }
+
+// ── Readme Overlay ──────────────────────────────────────────────────
+
+export class ReadmeOverlay {
+  private lines: string[];
+  private filePath: string;
+  private scrollOffset = 0;
+  private visibleHeight = 0;
+  private displayLineCount = 0;
+  private cachedWidth?: number;
+  private cachedLines?: string[];
+  private theme: {
+    fg: (color: string, text: string) => string;
+    bg: (color: string, text: string) => string;
+  };
+  private onClose: () => void;
+
+  constructor(
+    lines: string[],
+    filePath: string,
+    theme: {
+      fg: (color: string, text: string) => string;
+      bg: (color: string, text: string) => string;
+    },
+    onClose: () => void,
+  ) {
+    this.lines = lines;
+    this.filePath = filePath;
+    this.theme = theme;
+    this.onClose = onClose;
+  }
+
+  handleInput(data: string): void {
+    const total = this.displayLineCount;
+    if (matchesKey(data, Key.escape)) {
+      this.onClose();
+    } else if (matchesKey(data, Key.up)) {
+      if (this.scrollOffset > 0) {
+        this.scrollOffset--;
+        this.invalidate();
+      }
+    } else if (matchesKey(data, Key.down)) {
+      const maxScroll = Math.max(0, total - this.visibleHeight);
+      if (this.scrollOffset < maxScroll) {
+        this.scrollOffset++;
+        this.invalidate();
+      }
+    } else if (matchesKey(data, Key.home)) {
+      this.scrollOffset = 0;
+      this.invalidate();
+    } else if (matchesKey(data, Key.end)) {
+      this.scrollOffset = Math.max(0, total - this.visibleHeight);
+      this.invalidate();
+    } else if (matchesKey(data, Key.pageUp)) {
+      this.scrollOffset = Math.max(0, this.scrollOffset - this.visibleHeight);
+      this.invalidate();
+    } else if (matchesKey(data, Key.pageDown)) {
+      const maxScroll = Math.max(0, total - this.visibleHeight);
+      this.scrollOffset = Math.min(maxScroll, this.scrollOffset + this.visibleHeight);
+      this.invalidate();
+    }
+  }
+
+  render(width: number): string[] {
+    if (this.cachedLines && this.cachedWidth === width) {
+      return this.cachedLines;
+    }
+
+    const t = this.theme;
+    const B = (s: string) => t.fg("border", s);
+    const innerW = Math.max(1, width - 2);
+    const result: string[] = [];
+
+    // ── top border ───────────────────────────────────────────────
+    const title = `\uF02D ${this.filePath} `;
+    const topDash = Math.max(0, innerW - visibleWidth(title) - 3);
+    result.push(
+      B("\u250C\u2500 ") +
+        t.fg("accent", title) +
+        B(" " + "\u2500".repeat(topDash) + "\u2510"),
+    );
+
+    // ── separator ────────────────────────────────────────────────
+    result.push(
+      B("\u251C" + "\u2500".repeat(innerW) + "\u2524"),
+    );
+
+    // ── content lines ────────────────────────────────────────────
+    // Pre-wrap all raw lines into display lines, applying markdown coloring
+    const displayLines: string[] = [];
+    for (const rawLine of this.lines) {
+      const line = rawLine.replace(/\t/g, "    ");
+
+      let colored: string;
+      if (line.startsWith("# ")) {
+        colored = t.fg("accent", line);
+      } else if (line.startsWith("## ")) {
+        colored = t.fg("accent", line);
+      } else if (line.startsWith("### ")) {
+        colored = t.fg("accent", line);
+      } else if (line.startsWith("```")) {
+        colored = t.fg("dim", line);
+      } else if (line.startsWith("> ")) {
+        colored = t.fg("muted", line);
+      } else {
+        colored = line;
+      }
+
+      // Wrap long lines so content is never truncated horizontally
+      const wrapped = wrapTextWithAnsi(colored, innerW);
+      for (const w of wrapped) {
+        displayLines.push(w);
+      }
+    }
+    this.displayLineCount = displayLines.length;
+
+    // Use same height formula as other overlays: min(50, max(5, floor(innerW * 0.5)))
+    this.visibleHeight = Math.min(50, Math.max(5, Math.floor(innerW * 0.5)));
+    const maxScroll = Math.max(0, this.displayLineCount - this.visibleHeight);
+    this.scrollOffset = Math.max(0, Math.min(this.scrollOffset, maxScroll));
+
+    const endIdx = Math.min(this.scrollOffset + this.visibleHeight, displayLines.length);
+
+    for (let i = this.scrollOffset; i < endIdx; i++) {
+      const dl = displayLines[i];
+      const padLen = Math.max(0, innerW - visibleWidth(dl));
+      result.push(B("\u2502") + dl + " ".repeat(padLen) + B("\u2502"));
+    }
+
+    // ── empty fill ───────────────────────────────────────────────
+    const filled = endIdx - this.scrollOffset;
+    for (let i = filled; i < this.visibleHeight; i++) {
+      result.push(B("\u2502") + " ".repeat(innerW) + B("\u2502"));
+    }
+
+    // ── scroll indicator ─────────────────────────────────────────
+    if (endIdx < this.displayLineCount) {
+      const pct = this.displayLineCount > 0
+        ? Math.round((this.scrollOffset / this.displayLineCount) * 100)
+        : 0;
+      const indicator = `\uF103 ${this.scrollOffset + 1}-${endIdx} of ${this.displayLineCount} lines (${pct}%)`;
+      const indPad = Math.max(0, innerW - visibleWidth(indicator));
+      result.push(
+        B("\u2502") + t.fg("muted", indicator) + " ".repeat(indPad) + B("\u2502"),
+      );
+    }
+
+    // ── footer separator ─────────────────────────────────────────
+    result.push(
+      B("\u251C" + "\u2500".repeat(innerW) + "\u2524"),
+    );
+
+    // ── footer ───────────────────────────────────────────────────
+    const footerLines = wrapText(
+      "\uF102\uF103 \u2191\u2193 scroll  PgUp/PgDn page  Home/End  Esc close",
+      innerW,
+    );
+    for (const fl of footerLines) {
+      result.push(
+        B("\u2502") + t.fg("dim", truncateToWidth(fl, innerW, "", true)) + B("\u2502"),
+      );
+    }
+
+    // ── bottom border ────────────────────────────────────────────
+    result.push(
+      B("\u2514" + "\u2500".repeat(innerW) + "\u2518"),
+    );
+
+    this.cachedWidth = width;
+    this.cachedLines = result.map((l) => truncateToWidth(l, width));
+    return this.cachedLines;
+  }
+
+  invalidate(): void {
+    this.cachedWidth = undefined;
+    this.cachedLines = undefined;
+  }
+}

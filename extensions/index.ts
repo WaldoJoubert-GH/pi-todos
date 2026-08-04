@@ -1,4 +1,6 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import * as fs from "node:fs";
+import * as path from "node:path";
 import {
   ensureDevDir,
   migrateIfNeeded,
@@ -45,7 +47,7 @@ import {
   upsertSentryUnifiedIssue,
   formatSentrySummary,
 } from "./src/sentry.js";
-import { UnifiedOverlay, TimesOverlay, ActionsOverlay, buildWidgetLines } from "./src/tui.js";
+import { UnifiedOverlay, TimesOverlay, ActionsOverlay, ReadmeOverlay, buildWidgetLines } from "./src/tui.js";
 import { registerTools } from "./src/tools.js";
 import {
   ensureAutotaskSetup,
@@ -823,6 +825,54 @@ async function showTimesOverlay(
   overlayHandle = null;
 }
 
+// ── readme overlay display ──────────────────────────────────────
+
+async function showReadmeOverlay(
+  ctx: never,
+  lines: string[],
+  filePath: string,
+): Promise<void> {
+  const ui = ctx as unknown as {
+    ui: {
+      custom: (
+        factory: (...args: unknown[]) => unknown,
+        options?: Record<string, unknown>,
+      ) => Promise<null>;
+    };
+  };
+
+  await ui.ui.custom(
+    (
+      tui: { requestRender: () => void },
+      theme: {
+        fg: (color: string, text: string) => string;
+        bg: (color: string, text: string) => string;
+      },
+      _keybindings: unknown,
+      done: (result: null) => void,
+    ) => {
+      const component = new ReadmeOverlay(lines, filePath, theme, () => done(null));
+      return {
+        render: (w: number) => component.render(w),
+        invalidate: () => component.invalidate(),
+        handleInput: (data: string) => {
+          component.handleInput(data);
+          component.invalidate();
+          tui.requestRender();
+        },
+      };
+    },
+    {
+      overlay: true,
+      overlayOptions: {
+        anchor: "top-left",
+        width: "100%",
+        maxHeight: "100%",
+      },
+    },
+  );
+}
+
 // ── actions overlay display ────────────────────────────────────────
 
 async function showActionsOverlay(
@@ -1561,6 +1611,54 @@ export default function (pi: ExtensionAPI) {
           return [];
         },
       );
+    },
+  });
+
+  // ── command: /readme ─────────────────────────────────────────
+  pi.registerCommand("readme", {
+    description:
+      "Open the project README.md in a full TUI overlay",
+    handler: async (_args: string, ctx) => {
+      if (!ctx.hasUI) {
+        // Non-interactive: just print the file
+        const candidates = ["README.md", "readme.md", "Readme.md", "ReadMe.md"];
+        let found: string | null = null;
+        for (const name of candidates) {
+          const fullPath = path.join(ctx.cwd, name);
+          if (fs.existsSync(fullPath)) {
+            found = fullPath;
+            break;
+          }
+        }
+        if (!found) {
+          console.log("No README.md found in this project.");
+          return;
+        }
+        console.log(fs.readFileSync(found, "utf-8"));
+        return;
+      }
+
+      // Interactive mode
+      const candidates = ["README.md", "readme.md", "Readme.md", "ReadMe.md"];
+      let found: string | null = null;
+      for (const name of candidates) {
+        const fullPath = path.join(ctx.cwd, name);
+        if (fs.existsSync(fullPath)) {
+          found = fullPath;
+          break;
+        }
+      }
+
+      if (!found) {
+        ctx.ui.notify("No README.md found in this project.", "warn");
+        return;
+      }
+
+      const content = fs.readFileSync(found, "utf-8");
+      const lines = content.split(/\r?\n/);
+      const displayPath = path.relative(ctx.cwd, found);
+
+      await showReadmeOverlay(ctx as never, lines, displayPath);
     },
   });
 
