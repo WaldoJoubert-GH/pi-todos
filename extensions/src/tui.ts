@@ -333,6 +333,7 @@ export class UnifiedOverlay {
   private filter: IssueFilter = "all";
   private stateGroupFilter: StateGroupFilter = "all";
   private selected = 0;
+  private selectedSet: Set<string> = new Set(); // Plane issue IDs for bulk ops
   private scrollOffset = 0;
   private visibleHeight = 0;
   private detailIssue: UnifiedIssue | null = null;
@@ -358,6 +359,7 @@ export class UnifiedOverlay {
 
   // Dropdown state
   private onChangeState: ((issue: UnifiedIssue, newStateId: string) => void) | null = null;
+  private onBulkChangeState: ((issueIds: string[], newStateId: string) => void) | null = null;
   private dropdownStates: PlaneStateItem[] = [];
   private dropdownOpen = false;
   private dropdownIndex = 0;
@@ -385,6 +387,7 @@ export class UnifiedOverlay {
     getTimeEntriesForIssue: (issueId: string) => TimeEntry[],
     cwd: string,
     onChangeState?: (issue: UnifiedIssue, newStateId: string) => void,
+    onBulkChangeState?: (issueIds: string[], newStateId: string) => void,
     onCreate?: (title: string) => Promise<boolean>,
   ) {
     this.allIssues = issues;
@@ -406,6 +409,7 @@ export class UnifiedOverlay {
       }
     };
     this.onChangeState = onChangeState ?? null;
+    this.onBulkChangeState = onBulkChangeState ?? null;
     this.onCreate = onCreate ?? null;
     this.applyFilter();
   }
@@ -416,9 +420,18 @@ export class UnifiedOverlay {
   }
 
   private openDropdown(): void {
-    const issue = this.detailIssue ?? this.filteredIssues[this.selected];
-    if (!issue || issue.source !== "plane") return;
     if (this.dropdownStates.length === 0) return;
+
+    const isBulk = this.selectedSet.size > 0 && this.detailIssue === null;
+
+    // In bulk mode, pick the first selected issue as the reference for pre-selection
+    const issue = isBulk
+      ? this.allIssues.find(
+          (i) => i.source === "plane" && i.id != null && this.selectedSet.has(i.id),
+        ) ?? null
+      : (this.detailIssue ?? this.filteredIssues[this.selected]);
+
+    if (!issue || issue.source !== "plane") return;
 
     // Sort states by group order (backlog → completed → cancelled)
     const groupOrder = [
@@ -437,13 +450,14 @@ export class UnifiedOverlay {
     });
     this.dropdownStates = sorted;
 
-    // Pre-select current state
+    // Pre-select current state of the reference issue
     const currentId = issue.state_id;
     const currentIdx = this.dropdownStates.findIndex(
       (s) => s.id === currentId,
     );
     this.dropdownIndex = currentIdx >= 0 ? currentIdx : 0;
-    this.dropdownIssue = issue;
+    // In bulk mode, dropdownIssue stays null (no single issue highlighted with ✓)
+    this.dropdownIssue = isBulk ? null : issue;
     this.dropdownOpen = true;
     this.invalidate();
   }
@@ -512,7 +526,12 @@ export class UnifiedOverlay {
       }
       if (matchesKey(data, Key.enter)) {
         const state = this.dropdownStates[this.dropdownIndex];
-        if (state && this.dropdownIssue && this.onChangeState) {
+        if (state && this.selectedSet.size > 0 && this.onBulkChangeState) {
+          // Bulk mode: pass all selected IDs to the bulk handler
+          const ids = [...this.selectedSet];
+          this.selectedSet.clear();
+          this.onBulkChangeState(ids, state.id);
+        } else if (state && this.dropdownIssue && this.onChangeState) {
           this.onChangeState(this.dropdownIssue, state.id);
         }
         this.dropdownOpen = false;
@@ -612,10 +631,22 @@ export class UnifiedOverlay {
     }
 
     // d → open state change dropdown (Plane issues only)
+    // In list view: bulk-change all selected if any, otherwise single issue.
+    // In detail view: always single-issue, ignoring bulk selection.
     if (matchesKey(data, "d")) {
-      const issue = this.detailIssue ?? this.filteredIssues[this.selected];
-      if (issue && issue.source === "plane") {
+      if (this.detailIssue !== null) {
+        if (this.detailIssue.source === "plane") {
+          this.openDropdown();
+        }
+        return;
+      }
+      if (this.selectedSet.size > 0) {
         this.openDropdown();
+      } else {
+        const issue = this.filteredIssues[this.selected];
+        if (issue && issue.source === "plane") {
+          this.openDropdown();
+        }
       }
       return;
     }
@@ -687,6 +718,20 @@ export class UnifiedOverlay {
         this.detailScroll = Math.max(0, this.detailScroll - 1);
       } else if (matchesKey(data, Key.home)) {
         this.detailScroll = 0;
+      }
+      return;
+    }
+
+    // Space → toggle multi-select (Plane only, list view only)
+    if (matchesKey(data, Key.space)) {
+      const issue = this.filteredIssues[this.selected];
+      if (issue && issue.source === "plane" && issue.id != null) {
+        if (this.selectedSet.has(issue.id)) {
+          this.selectedSet.delete(issue.id);
+        } else {
+          this.selectedSet.add(issue.id);
+        }
+        this.invalidate();
       }
       return;
     }
@@ -871,6 +916,10 @@ export class UnifiedOverlay {
       const idx = this.scrollOffset + i;
       const issue = displayIssues[i];
       const isSelected = idx === this.selected;
+      const isBulkSelected =
+        issue.source === "plane" &&
+        issue.id != null &&
+        this.selectedSet.has(issue.id);
       const runningId = this.getRunningEntryPlaneId();
       const isTimed =
         issue.source === "plane" &&
@@ -936,6 +985,19 @@ export class UnifiedOverlay {
             " ".repeat(padLen) +
             B("\u2502"),
         );
+      } else if (isBulkSelected) {
+        // Multi-select highlight: accent foreground on selectedBg
+        const content = t.bg(
+          "selectedBg",
+          t.fg("accent", ` ${row}`),
+        );
+        const padLen = Math.max(0, innerW - rowVis);
+        lines.push(
+          B("\u2502") +
+            content +
+            " ".repeat(padLen) +
+            B("\u2502"),
+        );
       } else {
         const padLen = Math.max(0, innerW - rowVis);
         lines.push(
@@ -963,7 +1025,7 @@ export class UnifiedOverlay {
 
     // ── footer ───────────────────────────────────────────────────
     const footerLines = wrapText(
-      "\uF102 \uF103 scroll  n new issue  Enter preview  s start/stop (Plane)  d change state (Plane)  f source  \u2190\u2192 group  Ctrl+Enter open  c copy  Esc close",
+      "\uF102 \uF103 scroll  n new issue  Enter preview  Space select  s start/stop (Plane)  d change state (Plane)  f source  \u2190\u2192 group  Ctrl+Enter open  c copy  Esc close",
       innerW,
     );
     for (const fl of footerLines) {
@@ -989,7 +1051,10 @@ export class UnifiedOverlay {
     const lines: string[] = [];
 
     // ── top border ───────────────────────────────────────────────
-    const title = `Change State `;
+    const isBulk = this.dropdownIssue === null && this.selectedSet.size > 0;
+    const title = isBulk
+      ? `Change State (${this.selectedSet.size} selected) `
+      : `Change State `;
     const topDash = Math.max(0, innerW - visibleWidth(title) - 3);
     lines.push(
       B("\u250C\u2500 ") +

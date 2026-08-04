@@ -297,6 +297,128 @@ async function handleChangeState(
   }
 }
 
+// ── bulk state change handler ────────────────────────────────────────
+
+async function handleBulkChangeState(
+  ctx: {
+    ui: { setWidget: (name: string, lines: string[]) => void; notify: (m: string, t?: string) => void };
+    cwd: string;
+  },
+  issueIds: string[],
+  newStateId: string,
+): Promise<void> {
+  const cfg = resolvePlaneConfig(ctx.cwd);
+  if (!cfg) return;
+
+  // Fetch states to resolve the new state's name/hex/group
+  const states = await getStates(ctx.cwd, cfg, cfg.token);
+  const newState = states.find((s) => s.id === newStateId);
+  if (!newState) {
+    ctx.ui.notify("Failed to resolve state.", "error");
+    return;
+  }
+
+  // Fire all API calls sequentially to avoid rate/race issues
+  let successCount = 0;
+  let failCount = 0;
+  for (const issueId of issueIds) {
+    const ok = await patchIssueState(cfg, cfg.token, issueId, newStateId);
+    if (ok) successCount++;
+    else failCount++;
+  }
+
+  // Single issues.json update
+  const EXCLUDED = new Set(["completed", "cancelled"]);
+  const issuesFile = loadIssues(ctx.cwd);
+
+  if (EXCLUDED.has(newState.group)) {
+    // Remove completed/cancelled issues from the unified list
+    const idSet = new Set(issueIds);
+    issuesFile.issues = issuesFile.issues.filter(
+      (i) => i.source !== "plane" || !idSet.has(i.id ?? ""),
+    );
+  } else {
+    for (let idx = 0; idx < issuesFile.issues.length; idx++) {
+      const i = issuesFile.issues[idx];
+      if (i.source === "plane" && i.id && issueIds.includes(i.id)) {
+        issuesFile.issues[idx] = {
+          ...i,
+          state_id: newState.id,
+          state_name: newState.name,
+          state_hex: newState.color,
+          state_group: newState.group,
+        };
+      }
+    }
+  }
+  saveIssues(ctx.cwd, issuesFile);
+
+  // Update lastPlaneCache in-memory
+  if (lastPlaneCache) {
+    const idSet = new Set(issueIds);
+    const stateChanges: Array<{ oldName: string; newName: string; newGroup: string }> = [];
+
+    for (let ci = 0; ci < lastPlaneCache.issues.length; ci++) {
+      const issue = lastPlaneCache.issues[ci];
+      if (!idSet.has(issue.id)) continue;
+      const oldName = issue.state_name ?? "Unknown";
+      const oldGroup = issue.state_group ?? "unknown";
+
+      lastPlaneCache.issues[ci] = {
+        ...issue,
+        state_id: newState.id,
+        state_name: newState.name,
+        state_hex: newState.color,
+        state_group: newState.group,
+      };
+      stateChanges.push({ oldName, newName: newState.name, newGroup: newState.group });
+    }
+
+    // Shift state counts
+    for (const { oldName, newName, newGroup } of stateChanges) {
+      if (lastPlaneCache.states[oldName]) {
+        lastPlaneCache.states[oldName].count = Math.max(
+          0,
+          lastPlaneCache.states[oldName].count - 1,
+        );
+      }
+      if (!lastPlaneCache.states[newName]) {
+        lastPlaneCache.states[newName] = {
+          count: 0,
+          color: newState.color,
+          group: newGroup,
+        };
+      }
+      lastPlaneCache.states[newName].count++;
+    }
+
+    // Remove excluded issues from cache
+    if (EXCLUDED.has(newState.group)) {
+      lastPlaneCache.issues = lastPlaneCache.issues.filter(
+        (i) => !idSet.has(i.id),
+      );
+    }
+
+    lastPlaneCache.total_active = lastPlaneCache.issues.filter(
+      (i) => (i.state_group ? ACTIVE_GROUPS.has(i.state_group) : true),
+    ).length;
+  }
+
+  // Refresh the widget
+  refreshWidget(ctx);
+
+  // Update the overlay if it's open
+  if (overlayComponent) {
+    const updatedFile = loadIssues(ctx.cwd);
+    overlayComponent.updateIssues(updatedFile.issues);
+  }
+
+  ctx.ui.notify(
+    `Changed ${successCount} issue${successCount !== 1 ? "s" : ""} to "${newState.name}"${failCount > 0 ? ` (${failCount} failed)` : ""}.`,
+    failCount > 0 ? "warn" : "info",
+  );
+}
+
 // ── create issue handler ────────────────────────────────────────────
 
 async function handleCreateIssue(
@@ -572,6 +694,7 @@ async function showOverlay(
   setWidget: (name: string, lines: string[]) => void,
   states: PlaneStateItem[],
   onChangeStateFn: (issue: UnifiedIssue, newStateId: string) => void,
+  onBulkChangeStateFn: (issueIds: string[], newStateId: string) => void,
   onCreateFn?: (title: string) => Promise<boolean>,
 ): Promise<void> {
   const ui = ctx as unknown as {
@@ -608,6 +731,7 @@ async function showOverlay(
           timeEntryState.filter((e) => e.issue_id === issueId),
         cwd,
         onChangeStateFn,
+        onBulkChangeStateFn,
         onCreateFn,
       );
       component.setStates(states);
@@ -1057,6 +1181,9 @@ export default function (pi: ExtensionAPI) {
         (issue, newStateId) => {
           handleChangeState(ctx, issue, newStateId);
         },
+        (issueIds, newStateId) => {
+          handleBulkChangeState(ctx, issueIds, newStateId);
+        },
         (title: string) =>
           handleCreateIssue(ctx, title),
       );
@@ -1152,6 +1279,9 @@ export default function (pi: ExtensionAPI) {
         stateItems,
         (issue, newStateId) => {
           handleChangeState(ctx, issue, newStateId);
+        },
+        (issueIds, newStateId) => {
+          handleBulkChangeState(ctx, issueIds, newStateId);
         },
         (title: string) =>
           handleCreateIssue(ctx, title),
