@@ -29,16 +29,29 @@ import {
   formatElapsed,
 } from "./github.js";
 import {
+  Container,
   decodeKittyPrintable,
   matchesKey,
   Key,
+  Spacer,
+  Text,
   truncateToWidth,
   visibleWidth,
   wrapTextWithAnsi,
 } from "@earendil-works/pi-tui";
+import { DynamicBorder } from "@earendil-works/pi-coding-agent";
 import * as cp from "node:child_process";
 import * as fs from "node:fs";
 import * as path from "node:path";
+
+// ── shared scroll helper ───────────────────────────────────────────
+
+/** Clamp scroll offset so the selected index stays visible within visibleHeight rows. */
+function clampScroll(selected: number, scrollOffset: number, visibleHeight: number): number {
+  if (selected < scrollOffset) return selected;
+  if (selected >= scrollOffset + visibleHeight) return selected - visibleHeight + 1;
+  return scrollOffset;
+}
 
 // ── filter type ──────────────────────────────────────────────────────
 
@@ -859,14 +872,7 @@ export class UnifiedOverlay {
   }
 
   private ensureVisible(): void {
-    if (this.selected < this.scrollOffset) {
-      this.scrollOffset = this.selected;
-    } else if (
-      this.selected >=
-      this.scrollOffset + this.visibleHeight
-    ) {
-      this.scrollOffset = this.selected - this.visibleHeight + 1;
-    }
+    this.scrollOffset = clampScroll(this.selected, this.scrollOffset, this.visibleHeight);
   }
 
   render(width: number): string[] {
@@ -1134,32 +1140,29 @@ export class UnifiedOverlay {
 
   private renderDropdown(width: number): string[] {
     const t = this.theme;
-    const B = (s: string) => t.fg("border", s);
-    const innerW = Math.max(1, width - 2);
     const lines: string[] = [];
 
     // ── top border ───────────────────────────────────────────────
+    const topBorder = new DynamicBorder((s) => t.fg("border", s));
+    for (const bl of topBorder.render(width)) lines.push(bl);
+
+    // ── title ────────────────────────────────────────────────────
     const isBulk = this.dropdownIssue === null && this.selectedSet.size > 0;
     const title = isBulk
-      ? `Change State (${this.selectedSet.size} selected) `
-      : `Change State `;
-    const topDash = Math.max(0, innerW - visibleWidth(title) - 3);
-    lines.push(
-      B("\u250C\u2500 ") +
-        t.fg("accent", title) +
-        B(" " + "\u2500".repeat(topDash) + "\u2510"),
-    );
+      ? `Change State (${this.selectedSet.size} selected)`
+      : `Change State`;
+    lines.push(truncateToWidth(`  ${t.fg("accent", title)}`, width));
 
     // ── hint row ─────────────────────────────────────────────────
     const hint = "\uF102\uF103 navigate  Enter select  Esc cancel";
-    const hintPad = Math.max(0, innerW - visibleWidth(hint));
-    lines.push(
-      B("\u2502") + t.fg("dim", hint) + " ".repeat(hintPad) + B("\u2502"),
-    );
+    lines.push(truncateToWidth(`  ${t.fg("dim", hint)}`, width));
 
     // ── separator ────────────────────────────────────────────────
     lines.push(
-      B("\u251C" + "\u2500".repeat(innerW) + "\u2524"),
+      truncateToWidth(
+        t.fg("border", "\u2500".repeat(Math.max(1, width))),
+        width,
+      ),
     );
 
     // ── state rows ───────────────────────────────────────────────
@@ -1172,26 +1175,21 @@ export class UnifiedOverlay {
       const pill = statePill(state.color, ` ${state.name} `);
       const indicator = isCurrent ? " \u2713" : "  ";
       const row = `${isSelected ? "\uF054 " : "  "}${pill}${indicator}`;
-      const rowVis = visibleWidth(row);
+      const rowVis = visibleWidth(`  ${row}`);
 
       if (isSelected) {
-        const content = t.bg("selectedBg", t.fg("text", row));
-        const padLen = Math.max(0, innerW - rowVis);
-        lines.push(
-          B("\u2502") + content + " ".repeat(padLen) + B("\u2502"),
-        );
+        const content = t.bg("selectedBg", t.fg("text", `  ${row}`));
+        const padLen = Math.max(0, width - rowVis);
+        lines.push(content + " ".repeat(padLen));
       } else {
-        const padLen = Math.max(0, innerW - rowVis);
-        lines.push(
-          B("\u2502") + row + " ".repeat(padLen) + B("\u2502"),
-        );
+        const padLen = Math.max(0, width - rowVis);
+        lines.push(`  ${row}` + " ".repeat(padLen));
       }
     }
 
     // ── bottom border ────────────────────────────────────────────
-    lines.push(
-      B("\u2514" + "\u2500".repeat(innerW) + "\u2518"),
-    );
+    const bottomBorder = new DynamicBorder((s) => t.fg("border", s));
+    for (const bl of bottomBorder.render(width)) lines.push(bl);
 
     return lines.map((l) => truncateToWidth(l, width));
   }
@@ -1200,67 +1198,58 @@ export class UnifiedOverlay {
 
   private renderInputMode(width: number): string[] {
     const t = this.theme;
-    const B = (s: string) => t.fg("border", s);
-    const innerW = Math.max(1, width - 2);
     const lines: string[] = [];
 
     // ── top border ───────────────────────────────────────────────
-    const title = "New Issue ";
-    const topDash = Math.max(0, innerW - visibleWidth(title) - 3);
-    lines.push(
-      B("\u250C\u2500 ") +
-        t.fg("accent", title) +
-        B(" " + "\u2500".repeat(topDash) + "\u2510"),
-    );
+    const topBorder = new DynamicBorder((s) => t.fg("border", s));
+    for (const bl of topBorder.render(width)) lines.push(bl);
+
+    // ── title ────────────────────────────────────────────────────
+    lines.push(truncateToWidth(`  ${t.fg("accent", "New Issue")}`, width));
 
     // ── hint row ─────────────────────────────────────────────────
     const hint = "Enter a title for the new issue…";
-    const hintPad = Math.max(0, innerW - hint.length);
-    lines.push(
-      B("\u2502") + t.fg("dim", hint) + " ".repeat(hintPad) + B("\u2502"),
-    );
+    lines.push(truncateToWidth(`  ${t.fg("dim", hint)}`, width));
 
     // ── separator ────────────────────────────────────────────────
     lines.push(
-      B("\u251C" + "\u2500".repeat(innerW) + "\u2524"),
+      truncateToWidth(
+        t.fg("border", "\u2500".repeat(Math.max(1, width))),
+        width,
+      ),
     );
 
     // ── input field ──────────────────────────────────────────────
     const cursor = this.inputBuffer.length > 0 ? "" : " ";
     const displayText = `\uF040 ${this.inputBuffer}${cursor}`;
-    const inputLine = padOrTrunc(displayText, innerW);
+    const inputLine = padOrTrunc(`  ${displayText}`, width);
     const inputContent = t.bg("selectedBg", t.fg("text", inputLine));
-    lines.push(
-      B("\u2502") + inputContent + B("\u2502"),
-    );
+    const inputPad = Math.max(0, width - visibleWidth(inputLine));
+    lines.push(inputContent + " ".repeat(inputPad));
 
-    // ── empty input warning for clarity (only shown when buffer is empty) ─
+    // ── empty input warning ──────────────────────────────────────
     if (this.inputBuffer.length === 0) {
-      const emptyMsg = padOrTrunc(
-        "(type a title — Enter creates, Esc cancels)",
-        innerW,
-      );
-      lines.push(
-        B("\u2502") + t.fg("muted", emptyMsg) + B("\u2502"),
-      );
+      const emptyMsg = "(type a title — Enter creates, Esc cancels)";
+      lines.push(truncateToWidth(`  ${t.fg("muted", emptyMsg)}`, width));
     }
 
-    // ── footer ───────────────────────────────────────────────────
+    // ── separator ────────────────────────────────────────────────
     lines.push(
-      B("\u251C" + "\u2500".repeat(innerW) + "\u2524"),
+      truncateToWidth(
+        t.fg("border", "\u2500".repeat(Math.max(1, width))),
+        width,
+      ),
     );
-    const footerLines = wrapText(
-      "Enter create  Esc cancel",
-      innerW,
-    );
+
+    // ── footer ───────────────────────────────────────────────────
+    const footerLines = wrapText("Enter create  Esc cancel", width - 4);
     for (const fl of footerLines) {
-      lines.push(B("\u2502") + t.fg("dim", truncateToWidth(fl, innerW, "", true)) + B("\u2502"));
+      lines.push(truncateToWidth(`  ${t.fg("dim", fl)}`, width));
     }
 
     // ── bottom border ────────────────────────────────────────────
-    lines.push(
-      B("\u2514" + "\u2500".repeat(innerW) + "\u2518"),
-    );
+    const bottomBorder = new DynamicBorder((s) => t.fg("border", s));
+    for (const bl of bottomBorder.render(width)) lines.push(bl);
 
     return lines.map((l) => truncateToWidth(l, width));
   }
@@ -1673,14 +1662,7 @@ export class UnifiedOverlay {
   }
 
   private ensureGanttVisible(): void {
-    if (this.selected < this.scrollOffset) {
-      this.scrollOffset = this.selected;
-    } else if (
-      this.selected >=
-      this.scrollOffset + this.visibleHeight
-    ) {
-      this.scrollOffset = this.selected - this.visibleHeight + 1;
-    }
+    this.scrollOffset = clampScroll(this.selected, this.scrollOffset, this.visibleHeight);
   }
 
   // ── Gantt render ──────────────────────────────────────────────────
@@ -2020,8 +2002,7 @@ export class TimesOverlay {
   private selected = 0;
   private scrollOffset = 0;
   private visibleHeight = 0;
-  private cachedWidth?: number;
-  private cachedLines?: string[];
+  private container: Container;
   private theme: {
     fg: (color: string, text: string) => string;
     bg: (color: string, text: string) => string;
@@ -2048,6 +2029,8 @@ export class TimesOverlay {
     this.onClose = onClose;
     this.utcOffset = utcOffset;
     this.syncError = syncError ?? null;
+    this.container = new Container();
+    this.rebuild();
   }
 
   updateData(
@@ -2087,52 +2070,60 @@ export class TimesOverlay {
   }
 
   private ensureVisible(): void {
-    if (this.selected < this.scrollOffset) {
-      this.scrollOffset = this.selected;
-    } else if (
-      this.selected >=
-      this.scrollOffset + this.visibleHeight
-    ) {
-      this.scrollOffset = this.selected - this.visibleHeight + 1;
-    }
+    this.scrollOffset = clampScroll(this.selected, this.scrollOffset, this.visibleHeight);
   }
 
-  render(width: number): string[] {
-    if (this.cachedLines && this.cachedWidth === width) {
-      return this.cachedLines;
-    }
-
-    const lines: string[] = [];
+  /** Rebuild the Container tree — called on construction and theme changes. */
+  private rebuild(): void {
     const t = this.theme;
-    const B = (s: string) => t.fg("border", s);
-    const innerW = Math.max(1, width - 2);
+    this.container = new Container();
 
     // ── top border ───────────────────────────────────────────────
+    this.container.addChild(new DynamicBorder((s) => t.fg("border", s)));
+
+    // ── title line ───────────────────────────────────────────────
     const dateStr = this.getLocalToday();
     const errorIcon = this.syncError ? " \uF06A" : "";
-    const title = `Time \u2014 ${dateStr}${errorIcon} `;
-    const topDash = Math.max(0, innerW - visibleWidth(title) - 3);
-    lines.push(
-      B("\u250C\u2500 ") +
-        t.fg("accent", title) +
-        B(" " + "\u2500".repeat(topDash) + "\u2510"),
-    );
+    const title = `Time \u2014 ${dateStr}${errorIcon}`;
+    this.container.addChild(new Text(t.fg("accent", title), 1, 0));
 
     // ── sync error banner ────────────────────────────────────────
     if (this.syncError) {
-      const errText = `  \uF06A ${this.syncError}`;
-      const errPad = Math.max(0, innerW - visibleWidth(errText));
-      lines.push(
-        B("\u2502") + t.fg("error", errText) + " ".repeat(errPad) + B("\u2502"),
+      this.container.addChild(
+        new Text(t.fg("error", `\uF06A ${this.syncError}`), 1, 0),
       );
     }
 
-    // ── column headers ───────────────────────────────────────────
+    this.container.addChild(new Spacer(1));
+  }
+
+  render(width: number): string[] {
+    const t = this.theme;
+    const innerW = Math.max(1, width - 2);
+
+    // ── column layout constants ──────────────────────────────────
     const timeW = 14;
     const durW = 10;
     const prefixW = 2;
     const descW = innerW - timeW - durW - 4 - prefixW;
+    const maxVisible = Math.min(50, Math.max(5, Math.floor(innerW * 0.5)));
+    this.visibleHeight = maxVisible;
 
+    const lines: string[] = [];
+
+    // ── frame (DynamicBorder + title + error) ────────────────────
+    const frameLines = this.container.render(width);
+    for (const fl of frameLines) lines.push(fl);
+
+    // ── separator ────────────────────────────────────────────────
+    lines.push(
+      truncateToWidth(
+        t.fg("border", "\u2500".repeat(Math.max(1, width))),
+        width,
+      ),
+    );
+
+    // ── column headers ───────────────────────────────────────────
     if (descW >= 10) {
       const header =
         padOrTrunc("Time", timeW) +
@@ -2140,33 +2131,18 @@ export class TimesOverlay {
         padOrTrunc("Duration", durW) +
         "  Description";
       lines.push(
-        B("\u2502") + t.fg("muted", header) + B("\u2502"),
-      );
-      lines.push(
-        B("\u251C" + "\u2500".repeat(innerW) + "\u2524"),
+        truncateToWidth(`  ${t.fg("muted", header)}`, width),
       );
     } else {
       lines.push(
-        B("\u2502") +
-          t.fg("muted", padOrTrunc("Terminal too narrow", innerW)) +
-          B("\u2502"),
+        truncateToWidth(`  ${t.fg("muted", "Terminal too narrow")}`, width),
       );
     }
 
     // ── rows ─────────────────────────────────────────────────────
-    const maxVisible = Math.min(
-      50,
-      Math.max(5, Math.floor(innerW * 0.5)),
-    );
-    this.visibleHeight = maxVisible;
-
     if (this.rows.length === 0) {
-      const empty = padOrTrunc(
-        "  (no time entries for this date)",
-        innerW,
-      );
       lines.push(
-        B("\u2502") + t.fg("dim", empty) + B("\u2502"),
+        truncateToWidth(`  ${t.fg("dim", "(no time entries for this date)")}`, width),
       );
     } else {
       const endIdx = Math.min(
@@ -2222,66 +2198,54 @@ export class TimesOverlay {
         const prefix = isSelected || isRunning ? "\uF054 " : "  ";
 
         const rowContent = `${timeColor}  ${durColor}  ${descColor}`;
+        const rowPlain = `${prefix}${timeStr}  ${durStr}  ${descStr}`;
 
         if (isSelected) {
           const content = t.bg("selectedBg", t.fg("text", `${prefix}${rowContent}`));
-          const rowVis = visibleWidth(
-            `${prefix}${timeStr}  ${durStr}  ${descStr}`,
-          );
-          const padLen = Math.max(0, innerW - rowVis);
-          lines.push(
-            B("\u2502") + content + " ".repeat(padLen) + B("\u2502"),
-          );
+          const padLen = Math.max(0, width - visibleWidth(rowPlain));
+          lines.push(content + " ".repeat(padLen));
         } else {
           const prefixColored = isRunning ? t.fg("info", prefix) : prefix;
           const line = `${prefixColored}${rowContent}`;
-          const rowVis = visibleWidth(
-            `${prefix}${timeStr}  ${durStr}  ${descStr}`,
-          );
-          const padLen = Math.max(0, innerW - rowVis);
-          lines.push(
-            B("\u2502") + line + " ".repeat(padLen) + B("\u2502"),
-          );
+          const padLen = Math.max(0, width - visibleWidth(rowPlain));
+          lines.push(line + " ".repeat(padLen));
         }
       }
 
       // Scroll indicator
       if (endIdx < this.rows.length) {
         const remaining = this.rows.length - endIdx;
-        const indicator = padOrTrunc(
-          `\uF103 ${remaining} more`,
-          innerW,
-        );
         lines.push(
-          B("\u2502") + t.fg("muted", indicator) + B("\u2502"),
+          truncateToWidth(
+            `  ${t.fg("muted", `\uF103 ${remaining} more`)}`,
+            width,
+          ),
         );
       }
     }
 
     // ── footer separator ─────────────────────────────────────────
     lines.push(
-      B("\u251C" + "\u2500".repeat(innerW) + "\u2524"),
+      truncateToWidth(
+        t.fg("border", "\u2500".repeat(Math.max(1, width))),
+        width,
+      ),
     );
 
     // ── footer ───────────────────────────────────────────────────
     const totalStr = `Total: ${this.totalHours.toFixed(1)}h`;
-    const navStr = "Esc close";
-    const footer = padOrTrunc(`${totalStr}  \u00B7  ${navStr}`, innerW);
-    lines.push(B("\u2502") + t.fg("dim", footer) + B("\u2502"));
+    const footer = `  ${totalStr}  \u00B7  Esc close`;
+    lines.push(truncateToWidth(t.fg("dim", footer), width));
 
     // ── bottom border ────────────────────────────────────────────
-    lines.push(
-      B("\u2514" + "\u2500".repeat(innerW) + "\u2518"),
-    );
+    const bottomBorder = new DynamicBorder((s) => t.fg("border", s));
+    for (const bl of bottomBorder.render(width)) lines.push(bl);
 
-    this.cachedWidth = width;
-    this.cachedLines = lines;
     return lines.map((l) => truncateToWidth(l, width));
   }
 
   invalidate(): void {
-    this.cachedWidth = undefined;
-    this.cachedLines = undefined;
+    this.rebuild();
   }
 
   private getLocalToday(): string {
@@ -2509,14 +2473,7 @@ export class ActionsOverlay {
   }
 
   private ensureVisible(): void {
-    if (this.selected < this.scrollOffset) {
-      this.scrollOffset = this.selected;
-    } else if (
-      this.selected >=
-      this.scrollOffset + this.visibleHeight
-    ) {
-      this.scrollOffset = this.selected - this.visibleHeight + 1;
-    }
+    this.scrollOffset = clampScroll(this.selected, this.scrollOffset, this.visibleHeight);
   }
 
   render(width: number): string[] {
@@ -2994,8 +2951,7 @@ export class ReadmeOverlay {
   private scrollOffset = 0;
   private visibleHeight = 0;
   private displayLineCount = 0;
-  private cachedWidth?: number;
-  private cachedLines?: string[];
+  private container: Container;
   private theme: {
     fg: (color: string, text: string) => string;
     bg: (color: string, text: string) => string;
@@ -3015,6 +2971,23 @@ export class ReadmeOverlay {
     this.filePath = filePath;
     this.theme = theme;
     this.onClose = onClose;
+    this.container = new Container();
+    this.rebuild();
+  }
+
+  private rebuild(): void {
+    const t = this.theme;
+    this.container = new Container();
+
+    // Top border
+    this.container.addChild(new DynamicBorder((s) => t.fg("border", s)));
+
+    // Title
+    this.container.addChild(
+      new Text(t.fg("accent", `\uF02D ${this.filePath}`), 1, 0),
+    );
+
+    this.container.addChild(new Spacer(1));
   }
 
   handleInput(data: string): void {
@@ -3024,52 +2997,39 @@ export class ReadmeOverlay {
     } else if (matchesKey(data, Key.up)) {
       if (this.scrollOffset > 0) {
         this.scrollOffset--;
-        this.invalidate();
       }
     } else if (matchesKey(data, Key.down)) {
       const maxScroll = Math.max(0, total - this.visibleHeight);
       if (this.scrollOffset < maxScroll) {
         this.scrollOffset++;
-        this.invalidate();
       }
     } else if (matchesKey(data, Key.home)) {
       this.scrollOffset = 0;
-      this.invalidate();
     } else if (matchesKey(data, Key.end)) {
       this.scrollOffset = Math.max(0, total - this.visibleHeight);
-      this.invalidate();
     } else if (matchesKey(data, Key.pageUp)) {
       this.scrollOffset = Math.max(0, this.scrollOffset - this.visibleHeight);
-      this.invalidate();
     } else if (matchesKey(data, Key.pageDown)) {
       const maxScroll = Math.max(0, total - this.visibleHeight);
       this.scrollOffset = Math.min(maxScroll, this.scrollOffset + this.visibleHeight);
-      this.invalidate();
     }
   }
 
   render(width: number): string[] {
-    if (this.cachedLines && this.cachedWidth === width) {
-      return this.cachedLines;
-    }
-
     const t = this.theme;
-    const B = (s: string) => t.fg("border", s);
     const innerW = Math.max(1, width - 2);
     const result: string[] = [];
 
-    // ── top border ───────────────────────────────────────────────
-    const title = `\uF02D ${this.filePath} `;
-    const topDash = Math.max(0, innerW - visibleWidth(title) - 3);
-    result.push(
-      B("\u250C\u2500 ") +
-        t.fg("accent", title) +
-        B(" " + "\u2500".repeat(topDash) + "\u2510"),
-    );
+    // ── frame (DynamicBorder + title) ───────────────────────────
+    const frameLines = this.container.render(width);
+    for (const fl of frameLines) result.push(fl);
 
     // ── separator ────────────────────────────────────────────────
     result.push(
-      B("\u251C" + "\u2500".repeat(innerW) + "\u2524"),
+      truncateToWidth(
+        t.fg("border", "\u2500".repeat(Math.max(1, width))),
+        width,
+      ),
     );
 
     // ── content lines ────────────────────────────────────────────
@@ -3110,14 +3070,13 @@ export class ReadmeOverlay {
 
     for (let i = this.scrollOffset; i < endIdx; i++) {
       const dl = displayLines[i];
-      const padLen = Math.max(0, innerW - visibleWidth(dl));
-      result.push(B("\u2502") + dl + " ".repeat(padLen) + B("\u2502"));
+      result.push(truncateToWidth(`  ${dl}`, width));
     }
 
     // ── empty fill ───────────────────────────────────────────────
     const filled = endIdx - this.scrollOffset;
     for (let i = filled; i < this.visibleHeight; i++) {
-      result.push(B("\u2502") + " ".repeat(innerW) + B("\u2502"));
+      result.push("");
     }
 
     // ── scroll indicator ─────────────────────────────────────────
@@ -3126,15 +3085,15 @@ export class ReadmeOverlay {
         ? Math.round((this.scrollOffset / this.displayLineCount) * 100)
         : 0;
       const indicator = `\uF103 ${this.scrollOffset + 1}-${endIdx} of ${this.displayLineCount} lines (${pct}%)`;
-      const indPad = Math.max(0, innerW - visibleWidth(indicator));
-      result.push(
-        B("\u2502") + t.fg("muted", indicator) + " ".repeat(indPad) + B("\u2502"),
-      );
+      result.push(truncateToWidth(`  ${t.fg("muted", indicator)}`, width));
     }
 
-    // ── footer separator ─────────────────────────────────────────
+    // ── separator ────────────────────────────────────────────────
     result.push(
-      B("\u251C" + "\u2500".repeat(innerW) + "\u2524"),
+      truncateToWidth(
+        t.fg("border", "\u2500".repeat(Math.max(1, width))),
+        width,
+      ),
     );
 
     // ── footer ───────────────────────────────────────────────────
@@ -3143,23 +3102,17 @@ export class ReadmeOverlay {
       innerW,
     );
     for (const fl of footerLines) {
-      result.push(
-        B("\u2502") + t.fg("dim", truncateToWidth(fl, innerW, "", true)) + B("\u2502"),
-      );
+      result.push(truncateToWidth(`  ${t.fg("dim", truncateToWidth(fl, innerW, "", true))}`, width));
     }
 
     // ── bottom border ────────────────────────────────────────────
-    result.push(
-      B("\u2514" + "\u2500".repeat(innerW) + "\u2518"),
-    );
+    const bottomBorder = new DynamicBorder((s) => t.fg("border", s));
+    for (const bl of bottomBorder.render(width)) result.push(bl);
 
-    this.cachedWidth = width;
-    this.cachedLines = result.map((l) => truncateToWidth(l, width));
-    return this.cachedLines;
+    return result.map((l) => truncateToWidth(l, width));
   }
 
   invalidate(): void {
-    this.cachedWidth = undefined;
-    this.cachedLines = undefined;
+    this.rebuild();
   }
 }
