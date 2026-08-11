@@ -2097,9 +2097,9 @@ export class TimesOverlay {
           }
         } else {
           // Local entry: cyan for non-running, bright cyan for running
-          timeColor = t.fg("info", timeStr);
-          durColor = t.fg("info", durStr);
-          descColor = t.fg("info", descStr);
+          timeColor = t.fg("accent", timeStr);
+          durColor = t.fg("accent", durStr);
+          descColor = t.fg("accent", descStr);
         }
 
         const isRunning = row.source === "local" && row.isRunning;
@@ -2115,7 +2115,7 @@ export class TimesOverlay {
           const padLen = Math.max(0, width - visibleWidth(rowPlain));
           lines.push(content + " ".repeat(padLen));
         } else {
-          const prefixColored = isRunning ? t.fg("info", prefix) : prefix;
+          const prefixColored = isRunning ? t.fg("accent", prefix) : prefix;
           const line = `${prefixColored}${rowContent}`;
           const padLen = Math.max(0, width - visibleWidth(rowPlain));
           lines.push(line + " ".repeat(padLen));

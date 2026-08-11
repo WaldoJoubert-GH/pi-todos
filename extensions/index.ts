@@ -682,10 +682,11 @@ function startGhRunsSync(ctx: {
   );
 }
 
-// ── overlay display ──────────────────────────────────────────────────
+// ── fullscreen display ───────────────────────────────────────────────
 
 interface TuiHandle {
   requestRender: () => void;
+  terminal: { rows: number };
 }
 
 async function showOverlay(
@@ -739,8 +740,9 @@ async function showOverlay(
       component.setStates(states);
       component.requestRender = () => tui.requestRender();
       overlayComponent = component;
+      const termRows = tui.terminal.rows;
       return {
-        render: (w: number) => component.render(w),
+        render: (w: number) => padToHeight(component.render(w), termRows),
         invalidate: () => component.invalidate(),
         handleInput: (data: string) => {
           component.handleInput(data);
@@ -763,7 +765,7 @@ async function showOverlay(
   overlayHandle = null;
 }
 
-// ── times overlay display ──────────────────────────────────────────
+// ── times fullscreen display ───────────────────────────────────────
 
 async function showTimesOverlay(
   ctx: never,
@@ -801,8 +803,9 @@ async function showTimesOverlay(
         syncError,
       );
       overlayComponent = component as unknown as UnifiedOverlay;
+      const termRows = tui.terminal.rows;
       return {
-        render: (w: number) => component.render(w),
+        render: (w: number) => padToHeight(component.render(w), termRows),
         invalidate: () => component.invalidate(),
         handleInput: (data: string) => {
           component.handleInput(data);
@@ -825,7 +828,7 @@ async function showTimesOverlay(
   overlayHandle = null;
 }
 
-// ── readme overlay display ──────────────────────────────────────
+// ── readme fullscreen display ───────────────────────────────────
 
 async function showReadmeOverlay(
   ctx: never,
@@ -843,7 +846,7 @@ async function showReadmeOverlay(
 
   await ui.ui.custom(
     (
-      tui: { requestRender: () => void },
+      tui: TuiHandle,
       theme: {
         fg: (color: string, text: string) => string;
         bg: (color: string, text: string) => string;
@@ -852,8 +855,9 @@ async function showReadmeOverlay(
       done: (result: null) => void,
     ) => {
       const component = new ReadmeOverlay(lines, filePath, theme, () => done(null));
+      const termRows = tui.terminal.rows;
       return {
-        render: (w: number) => component.render(w),
+        render: (w: number) => padToHeight(component.render(w), termRows),
         invalidate: () => component.invalidate(),
         handleInput: (data: string) => {
           component.handleInput(data);
@@ -873,7 +877,7 @@ async function showReadmeOverlay(
   );
 }
 
-// ── actions overlay display ────────────────────────────────────────
+// ── actions fullscreen display ─────────────────────────────────────
 
 async function showActionsOverlay(
   ctx: never,
@@ -910,8 +914,9 @@ async function showActionsOverlay(
         ownerRepo,
       );
       component.requestRender = () => tui.requestRender();
+      const termRows = tui.terminal.rows;
       return {
-        render: (w: number) => component.render(w),
+        render: (w: number) => padToHeight(component.render(w), termRows),
         invalidate: () => component.invalidate(),
         handleInput: (data: string) => {
           component.handleInput(data);
@@ -929,6 +934,16 @@ async function showActionsOverlay(
       },
     },
   );
+}
+
+// ── helpers ──────────────────────────────────────────────────────────
+
+/** Pad rendered lines to fill the terminal height for full-screen overlays. */
+function padToHeight(lines: string[], termRows: number): string[] {
+  while (lines.length < termRows) {
+    lines.push("");
+  }
+  return lines;
 }
 
 // ── extension ────────────────────────────────────────────────────────
